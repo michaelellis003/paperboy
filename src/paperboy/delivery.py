@@ -53,6 +53,18 @@ def _manifest(documents: list[tuple[str, bytes]]) -> str:
     )
 
 
+def _mask_email(address: str) -> str:
+    """Abbreviate an address for receipts.
+
+    Receipts travel through the model conversation, which users share
+    in screenshots and logs, so the full device address stays out of
+    them. Two leading characters plus the domain is enough to confirm
+    which destination was used.
+    """
+    local, _, domain = address.partition("@")
+    return f"{local[:2]}…@{domain}" if domain else f"{local[:2]}…"
+
+
 def send_documents(documents: list[tuple[str, bytes]]) -> str:
     """Deliver documents to the configured e-reader.
 
@@ -144,7 +156,7 @@ def _send_email(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
 
     return (
         f"Sent {len(documents)} document(s), {total / 1e6:.1f} MB total, "
-        f"to {cfg.device_email}: {_manifest(documents)}"
+        f"to {_mask_email(cfg.device_email)}: {_manifest(documents)}"
     )
 
 

@@ -100,6 +100,10 @@ def test_email_send_ssl(env, monkeypatch):
     assert attachments[0].get_content_type() == "application/pdf"
     assert attachments[1].get_content_type() == "application/epub+zip"
     assert "2 document(s)" in receipt
+    # The full device address stays out of receipts; they end up in
+    # conversation logs and screenshots.
+    assert "reader@kindle.com" not in receipt
+    assert "re…@kindle.com" in receipt
 
 
 def test_email_send_starttls(env, monkeypatch):
