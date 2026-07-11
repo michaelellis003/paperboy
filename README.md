@@ -30,9 +30,11 @@ Papers are resolved by arXiv id (arXiv Atom API), DOI (Crossref metadata
 plus Unpaywall open-access PDF lookup), or bare title (OpenAlex search,
 accepted only on a high-confidence fuzzy match, so a reading list Claude
 produced in conversation can be sent directly). Search runs against
-OpenAlex (~250M works) or arXiv. When a paper can't be resolved or has
-no open-access PDF, the tool says so in its receipt and Claude relays
-that to you. Nothing is dropped silently.
+OpenAlex (~250M works) or arXiv. OpenAlex sometimes rate-limits bursts
+of requests; the server retries once, and if the limit persists the
+error says to wait or switch to `source="arxiv"`. When a paper can't
+be resolved or has no open-access PDF, the tool says so in its receipt
+and Claude relays that to you. Nothing is dropped silently.
 
 ### Delivery backends
 
@@ -59,6 +61,10 @@ reMarkable (real cloud API) is on the roadmap.
 | `setup_status` | Report what's configured and what's missing (no secrets) so Claude can guide setup |
 
 ## Setup
+
+Running locally is the whole story for most users: this section and
+nothing else. The Cloud Run material further down only matters for
+access from claude.ai or a phone.
 
 Run the interactive wizard. It asks which e-reader you have, walks
 through only the credentials that device needs, and validates each one

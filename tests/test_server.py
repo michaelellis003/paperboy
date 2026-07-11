@@ -207,13 +207,58 @@ def test_recommend_interleaves_arms(zotero_env, monkeypatch, paper_factory):
         ],
     )
     result = server.recommend_papers(interests=["topic"], max_results=2)
-    # the keyword arm gets a fair slot instead of being pushed out
-    assert [r["title"] for r in result["picks"]] == ["Graph 0", "Keyword Hit"]
-    # and each pick says which arm produced it
+    # stated interests LEAD; library-graph picks trail, clearly tagged
+    assert [r["title"] for r in result["picks"]] == ["Keyword Hit", "Graph 0"]
     assert [r["via"] for r in result["picks"]] == [
-        "citation-graph",
         "interest-keyword",
+        "related-to-library",
     ]
+
+
+def test_recommend_filters_malformed_upstream_records(
+    zotero_env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(zotero_client, "seed_ids", lambda limit=10: ["ArXiv:1"])
+    monkeypatch.setattr(zotero_client, "known_identities", set)
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: [
+            # truncated junk: no ids, garbage title (a real S2 record)
+            paper_factory(title="UvA-DARE (", arxiv_id=None, doi=None),
+            paper_factory(title="A Real Paper", arxiv_id="2606.5", doi=None),
+        ],
+    )
+    result = server.recommend_papers()
+    assert [r["title"] for r in result["picks"]] == ["A Real Paper"]
+
+
+def test_recommend_tags_explicit_seed_graph_picks(
+    env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: [
+            paper_factory(title="Neighbor", arxiv_id="2606.7", doi=None)
+        ],
+    )
+    result = server.recommend_papers(seed_refs=["2401.12345"])
+    assert result["picks"][0]["via"] == "related-to-seeds"
+
+
+def test_search_filters_malformed_records(env, monkeypatch, paper_factory):
+    monkeypatch.setattr(
+        openalex,
+        "search",
+        lambda q, max_results: [
+            paper_factory(title="(untitled)", arxiv_id=None, doi=None),
+            paper_factory(title="Kept Result"),
+        ],
+    )
+    results = server.search_papers("q")
+    assert [r["title"] for r in results] == ["Kept Result"]
 
 
 def test_recommend_explicit_seeds(env, monkeypatch, paper_factory):

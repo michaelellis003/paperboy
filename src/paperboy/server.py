@@ -102,7 +102,7 @@ def search_papers(
             f"Search failed ({type(exc).__name__}): {exc} — retry, or "
             "rephrase the query"
         ) from exc
-    return [_summary(paper) for paper in papers]
+    return [_summary(paper) for paper in papers if _is_usable(paper)]
 
 
 def _identity_keys(paper: Paper) -> set[str]:
@@ -115,6 +115,23 @@ def _identity_keys(paper: Paper) -> set[str]:
         )
         if key
     }
+
+
+def _is_usable(paper: Paper) -> bool:
+    """Reject malformed upstream records before they reach the user.
+
+    Some sources emit truncated junk like 'UvA-DARE (' as both ref and
+    title. A result is only useful if it carries a resolvable id, or a
+    title long enough to round-trip through title resolution.
+    """
+    if paper.arxiv_id or paper.doi:
+        return True
+    title = paper.title.strip()
+    return (
+        len(title) >= 10
+        and not title.startswith("(")  # "(untitled)"
+        and not title.endswith("(")  # truncated, e.g. "UvA-DARE ("
+    )
 
 
 @mcp.tool
@@ -137,13 +154,15 @@ def recommend_papers(
     the 100 most recently added items). max_results is capped at 20.
 
     Returns {"picks": [...], "problems": [...]}: picks carry refs for
-    send_papers / queue_papers, and each pick has a ``via`` field —
-    'citation-graph' (related to the seeds/library) or
-    'interest-keyword' (matched a stated interest) — so the user can
-    see why it appeared. problems reports any discovery arm that
-    failed or seed that didn't resolve — ALWAYS relay problems, or a
-    stated interest may silently go uncovered. Present picks and let
-    the user choose; don't send unasked.
+    send_papers / queue_papers, and each pick has a ``via`` field
+    saying why it appeared — 'interest-keyword' (matched a stated
+    interest), 'related-to-seeds' (citation graph of explicit seeds),
+    or 'related-to-library' (citation graph of the OWNER'S Zotero
+    library; can look off-topic to anyone else). When interests are
+    given they lead the results. problems reports any discovery arm
+    that failed or seed that didn't resolve — ALWAYS relay problems,
+    or a stated interest may silently go uncovered. Present picks and
+    let the user choose; don't send unasked.
     """
     max_results = max(1, min(max_results, 20))
     problems: list[str] = []
@@ -191,15 +210,29 @@ def recommend_papers(
     for group in zip_longest(*per_phrase):
         keyword_arm.extend(paper for paper in group if paper is not None)
 
-    # Interleave the arms so citation-graph results never starve the
-    # conversation-interest results (or vice versa) within max_results.
-    # Each candidate keeps its arm so picks can say why they appeared.
+    # Interleave the arms so neither starves the other within
+    # max_results. Each candidate keeps its arm so picks can say why
+    # they appeared: graph picks from explicit seeds are
+    # "related-to-seeds"; graph picks from the library say so, because
+    # to anyone who isn't the library's owner they can look random.
+    graph_via = "related-to-seeds" if seed_refs else "related-to-library"
+    tagged_graph = [(p, graph_via) for p in graph_arm if _is_usable(p)]
+    tagged_keyword = [
+        (p, "interest-keyword") for p in keyword_arm if _is_usable(p)
+    ]
+    # When the caller states interests, those lead the interleave —
+    # the user asked for them; library taste is the secondary signal.
+    first, second = (
+        (tagged_keyword, tagged_graph)
+        if interests
+        else (tagged_graph, tagged_keyword)
+    )
     candidates: list[tuple[Paper, str]] = []
-    for graph_paper, keyword_paper in zip_longest(graph_arm, keyword_arm):
-        if graph_paper is not None:
-            candidates.append((graph_paper, "citation-graph"))
-        if keyword_paper is not None:
-            candidates.append((keyword_paper, "interest-keyword"))
+    for lead, trail in zip_longest(first, second):
+        if lead is not None:
+            candidates.append(lead)
+        if trail is not None:
+            candidates.append(trail)
 
     known = (
         zotero_client.known_identities() if settings().zotero_enabled else set()
