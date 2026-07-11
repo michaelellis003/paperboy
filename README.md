@@ -1,5 +1,8 @@
 # paperboy
 
+[![CI](https://github.com/michaelellis003/paperboy/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelellis003/paperboy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An MCP server that delivers research papers to your e-reader, with Zotero
 as the source of truth. Ask Claude for a reading list, then say "queue
 them and send to my Kindle." (MCP is the plugin protocol Claude uses:
