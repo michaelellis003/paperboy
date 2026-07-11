@@ -3,7 +3,7 @@
 [![CI](https://github.com/michaelellis003/paperboy/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelellis003/paperboy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-![Claude finding three papers and sending them to a Kindle](assets/paperboy-demo.gif)
+![Claude finding three papers, filing them in Zotero, and sending two to a Kindle](assets/paperboy-demo.gif)
 
 An MCP server that delivers research papers to your e-reader, with Zotero
 as the source of truth. Ask Claude for a reading list, then say "queue
