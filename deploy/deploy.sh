@@ -39,6 +39,21 @@ PLAIN_VARS=(DELIVERY_METHOD DEVICE_EMAIL FROM_EMAIL SMTP_HOST SMTP_PORT
   SMTP_USER DROPBOX_APP_KEY DROPBOX_FOLDER ZOTERO_LIBRARY_ID
   ZOTERO_LIBRARY_TYPE READING_QUEUE_COLLECTION SENT_TAG CONTACT_EMAIL)
 
+command -v gcloud >/dev/null || {
+  echo "gcloud is not installed — https://cloud.google.com/sdk/docs/install" >&2
+  exit 1
+}
+ACTIVE_ACCOUNT=$(gcloud config get-value account 2>/dev/null || true)
+[[ -n "$ACTIVE_ACCOUNT" ]] || {
+  echo "gcloud is not authenticated — run: gcloud auth login" >&2
+  exit 1
+}
+# Catch stale tokens early, before half-creating resources.
+gcloud projects list --limit=1 >/dev/null 2>&1 || {
+  echo "gcloud credentials are stale — run: gcloud auth login" >&2
+  exit 1
+}
+
 [[ -f "$ENV_FILE" ]] || {
   echo "No .env at ${ENV_FILE} — run 'uv run paperboy setup' first." >&2
   exit 1
@@ -56,7 +71,16 @@ set +a
 
 echo "==> Project: ${PROJECT_ID}"
 if ! gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1; then
-  gcloud projects create "$PROJECT_ID"
+  if ! gcloud projects create "$PROJECT_ID" 2>/tmp/paperboy-create.err; then
+    if grep -q "already in use" /tmp/paperboy-create.err; then
+      echo "Project id '${PROJECT_ID}' is taken GLOBALLY (all of GCP," >&2
+      echo "not just your account) — try a more specific id, e.g." >&2
+      echo "'${PROJECT_ID}-$(whoami)' or '${PROJECT_ID}-mcp'." >&2
+    else
+      cat /tmp/paperboy-create.err >&2
+    fi
+    exit 1
+  fi
 fi
 
 if [[ -z "$BILLING_ACCOUNT" ]]; then
@@ -73,7 +97,29 @@ gcloud billing projects link "$PROJECT_ID" \
 echo "==> Enabling APIs (first run takes a minute)"
 gcloud services enable run.googleapis.com secretmanager.googleapis.com \
   cloudbuild.googleapis.com artifactregistry.googleapis.com \
-  --project "$PROJECT_ID"
+  billingbudgets.googleapis.com --project "$PROJECT_ID"
+
+# Two fresh-project gaps that otherwise fail the first deploy (both
+# hit during this script's development):
+#   1. The source-deploy Artifact Registry repo is not auto-created
+#      reliably on brand-new projects.
+#   2. Cloud Build runs as the default compute SA, which lacks its
+#      builder role (source-bucket read + registry write) until
+#      something grants it.
+echo "==> Fresh-project build prerequisites"
+if ! gcloud artifacts repositories describe cloud-run-source-deploy \
+  --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud artifacts repositories create cloud-run-source-deploy \
+    --repository-format=docker --location "$REGION" \
+    --project "$PROJECT_ID" >/dev/null
+fi
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" \
+  --format="value(projectNumber)")
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role roles/cloudbuild.builds.builder --condition=None >/dev/null
+# IAM grants propagate asynchronously; a fresh grant needs a moment.
+sleep 15
 
 echo "==> Service account with least privilege"
 if ! gcloud iam service-accounts describe "$SA_EMAIL" \
@@ -128,6 +174,23 @@ gcloud run deploy "$SERVICE" \
 URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" \
   --region "$REGION" --format="value(status.url)")
 
+echo "==> Budget alert (\$1/month, scoped to this project)"
+BUDGET_NOTE="Budget alert created — you'll be emailed if costs appear."
+if ! gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
+  --format="value(displayName)" 2>/dev/null \
+  | grep -q "^${SERVICE}-${PROJECT_ID}-guardrail$"; then
+  if ! gcloud billing budgets create \
+    --billing-account="$BILLING_ACCOUNT" \
+    --display-name="${SERVICE}-${PROJECT_ID}-guardrail" \
+    --budget-amount=1USD \
+    --filter-projects="projects/${PROJECT_ID}" >/dev/null 2>&1; then
+    BUDGET_NOTE="Could not create the budget (needs Billing Account
+  Costs Manager). Create it manually:
+  https://console.cloud.google.com/billing/budgets
+  (\$1/month scoped to project ${PROJECT_ID})"
+  fi
+fi
+
 cat <<DONE
 
 ==> Deployed.
@@ -140,8 +203,5 @@ claude.ai -> Settings -> Connectors -> Add custom connector:
   and supply the bearer token.
 
 Cost guardrails in place: max 1 instance, scales to zero when idle,
-free-tier region. Recommended final step — a budget alert so drift is
-impossible to miss:
-  https://console.cloud.google.com/billing/budgets
-  (create a \$1/month budget scoped to project ${PROJECT_ID})
+free-tier region. ${BUDGET_NOTE}
 DONE

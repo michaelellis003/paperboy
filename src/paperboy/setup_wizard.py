@@ -331,5 +331,7 @@ def _run(argv: list[str] | None = None) -> None:
     print("    (--directory matters: the server loads .env from there)")
     print("  - Try it:     ask Claude to send a paper to your device")
     if "MCP_AUTH_TOKEN" in values:
-        print("  - Remote use: deploy (see README) and add a claude.ai")
-        print("    connector with your MCP_AUTH_TOKEN as the bearer token")
+        print("  - Remote use:  gcloud auth login && \\")
+        print("      ./deploy/deploy.sh <a-globally-unique-project-id>")
+        print("    (creates the GCP project, secrets, cost guardrails,")
+        print("    and prints the claude.ai connector instructions)")
