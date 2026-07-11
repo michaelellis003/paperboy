@@ -7,12 +7,13 @@ sets PORT, which switches on the HTTP transport automatically.
 
 import os
 import sys
+from itertools import zip_longest
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-from . import arxiv, delivery, openalex, resolver, zotero_client
+from . import arxiv, delivery, openalex, resolver, s2, zotero_client
 from .config import settings
 from .models import Paper, normalize_title
 
@@ -29,8 +30,11 @@ mcp = FastMCP(
         "queueing/sending new papers, check list_collections and pass "
         "collections=[...] to file them topically — propose a fit from "
         "the paper's topic, and ASK THE USER when the fit is ambiguous "
-        "rather than guessing. Always relay delivery receipts — "
-        "including sizes, skipped papers, and failures — to the user."
+        "rather than guessing. Discovery: recommend_papers finds "
+        "related/new work from the user's library plus interests you "
+        "distill from the conversation — present picks, don't send "
+        "unasked. Always relay delivery receipts — including sizes, "
+        "skipped papers, and failures — to the user."
     ),
 )
 
@@ -81,6 +85,97 @@ def search_papers(
             "rephrase the query"
         ) from exc
     return [_summary(paper) for paper in papers]
+
+
+def _identity_keys(paper: Paper) -> set[str]:
+    return {
+        key
+        for key in (
+            paper.doi and paper.doi.lower(),
+            paper.arxiv_id,
+            normalize_title(paper.title),
+        )
+        if key
+    }
+
+
+@mcp.tool
+def recommend_papers(
+    seed_refs: list[str] | None = None,
+    interests: list[str] | None = None,
+    recent_only: bool = True,
+    max_results: int = 8,
+) -> list[dict]:
+    """Discover papers the user may want to read — old or new.
+
+    Blends two signals: citation-graph recommendations (Semantic
+    Scholar) seeded from ``seed_refs``, or — by default — the user's
+    Zotero library (what they queue and read IS their interest
+    profile); and keyword discovery (OpenAlex) from ``interests`` —
+    pass 2-4 short phrases distilled from the current conversation.
+    recent_only=True favors newly published work; False searches the
+    all-time pool (computer science only, an upstream limit).
+    Papers already in the user's library are excluded. Results carry
+    refs for send_papers / queue_papers — present them to the user
+    and let them pick; don't send unasked.
+    """
+    max_results = max(1, min(max_results, 20))
+    problems: list[str] = []
+
+    seeds: list[str] = []
+    if seed_refs:
+        resolved, problems = _resolve_all(seed_refs)
+        for paper in resolved:
+            if paper.arxiv_id:
+                seeds.append(f"ArXiv:{paper.arxiv_id}")
+            elif paper.doi:
+                seeds.append(f"DOI:{paper.doi}")
+    elif settings().zotero_enabled:
+        seeds = zotero_client.seed_ids(limit=10)
+    if not seeds and not interests:
+        raise RuntimeError(
+            "No discovery signal: pass seed_refs and/or interests, or "
+            "configure Zotero so the library can seed recommendations."
+        )
+
+    graph_arm: list[Paper] = []
+    keyword_arm: list[Paper] = []
+    if seeds:
+        pool = "recent" if recent_only else "all-cs"
+        try:
+            graph_arm = s2.recommend(seeds, pool=pool, limit=max_results * 2)
+        except httpx.HTTPError as exc:
+            problems.append(
+                f"recommendation backend unreachable "
+                f"({type(exc).__name__}) — keyword results only"
+            )
+    for phrase in (interests or [])[:4]:
+        try:
+            keyword_arm.extend(openalex.search(phrase, max_results=5))
+        except httpx.HTTPError:
+            problems.append(f"keyword search failed for: {phrase}")
+
+    # Interleave the arms so citation-graph results never starve the
+    # conversation-interest results (or vice versa) within max_results.
+    candidates: list[Paper] = []
+    for pair in zip_longest(graph_arm, keyword_arm):
+        candidates.extend(paper for paper in pair if paper is not None)
+
+    known = (
+        zotero_client.known_identities() if settings().zotero_enabled else set()
+    )
+    fresh: list[Paper] = []
+    seen: set[str] = set()
+    for paper in candidates:
+        keys = _identity_keys(paper)
+        if keys & known or keys & seen:
+            continue
+        seen |= keys
+        fresh.append(paper)
+
+    if not fresh and problems:
+        raise RuntimeError("No recommendations: " + "; ".join(problems))
+    return [_summary(paper) for paper in fresh[:max_results]]
 
 
 def _clean_collections(

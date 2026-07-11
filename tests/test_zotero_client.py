@@ -289,6 +289,37 @@ def test_collection_key_rejects_empty_name(fake_api):
         zotero_client.collection_key("   ", create=True)
 
 
+def test_seed_ids_newest_first(fake_api):
+    fake_api.queue = [
+        {"key": "A", "data": {"archiveID": "arXiv:1706.03762"}},
+        {"key": "B", "data": {"DOI": "10.1000/x"}},
+        {"key": "C", "data": {"title": "No ids at all"}},
+        {"key": "D", "data": {"archiveID": "arXiv:2312.00752"}},
+    ]
+    assert zotero_client.seed_ids(limit=2) == [
+        "ArXiv:2312.00752",
+        "DOI:10.1000/x",
+    ]
+
+
+def test_known_identities(fake_api):
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {
+                "title": "A Test Paper!",
+                "DOI": "10.1000/Mixed",
+                "archiveID": "arXiv:2401.12345",
+            },
+        }
+    ]
+    assert zotero_client.known_identities() == {
+        "a test paper",
+        "10.1000/mixed",
+        "2401.12345",
+    }
+
+
 def test_read_paths_never_create_the_queue_collection(fake_api, paper_factory):
     fake_api.existing_collections = []  # brand-new library
     assert zotero_client.find_item(paper_factory()) is None

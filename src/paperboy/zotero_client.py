@@ -235,6 +235,44 @@ def file_by_refs(
     return filed, misses
 
 
+def seed_ids(limit: int = 10) -> list[str]:
+    """S2-style seed ids (ArXiv:/DOI: prefixed) from the queue.
+
+    Newest items first — the library is the user's interest profile,
+    and recent additions weight recommendations toward current focus.
+    """
+    ids: list[str] = []
+    for item in reversed(_queue_items()):
+        data = item["data"]
+        archive = data.get("archiveID", "")
+        if archive.startswith("arXiv:"):
+            ids.append(archive.replace("arXiv:", "ArXiv:", 1))
+        elif data.get("DOI"):
+            ids.append(f"DOI:{data['DOI']}")
+        if len(ids) >= limit:
+            break
+    return ids
+
+
+def known_identities() -> set[str]:
+    """Identity keys of everything in the queue.
+
+    Lowered DOIs, arXiv ids, and normalized titles — used to exclude
+    already-known papers from recommendations.
+    """
+    keys: set[str] = set()
+    for item in _queue_items():
+        data = item["data"]
+        if data.get("DOI"):
+            keys.add(data["DOI"].lower())
+        archive = data.get("archiveID", "")
+        if archive.startswith("arXiv:"):
+            keys.add(archive.removeprefix("arXiv:"))
+        if data.get("title"):
+            keys.add(normalize_title(data["title"]))
+    return keys
+
+
 def unsent_queue_items() -> list[dict]:
     """Deliverable Reading Queue items: not sent, not known-unsendable."""
     cfg = settings()

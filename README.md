@@ -41,6 +41,7 @@ reMarkable (real cloud API) is on the roadmap.
 | Tool | What it does |
 |---|---|
 | `search_papers` | Search OpenAlex (general) or arXiv (`source="arxiv"`); results carry a `ref` and an `open_access_pdf` flag |
+| `recommend_papers` | Discover related/new papers: citation-graph recs (Semantic Scholar) seeded from your Zotero library + keyword discovery from conversation-distilled interests; excludes papers you already have |
 | `send_papers` | One-off send by arXiv id, DOI, URL, or title (also records in Zotero if configured) |
 | `queue_papers` | Add papers to the Zotero Reading Queue without sending (optionally filed into topical collections) |
 | `list_collections` | List Zotero collections so Claude can propose where to file a paper — or ask you |
@@ -156,5 +157,7 @@ open access interoperability. Paper metadata and open-access links come
 from [OpenAlex](https://openalex.org) (CC0),
 [Crossref](https://www.crossref.org) (open metadata), and
 [Unpaywall](https://unpaywall.org) (CC0 data), all run as open
-scholarly infrastructure. Library management via the
+scholarly infrastructure. Recommendations via the
+[Semantic Scholar](https://www.semanticscholar.org) Recommendations
+API (Allen Institute for AI). Library management via the
 [Zotero](https://www.zotero.org) web API.

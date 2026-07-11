@@ -99,6 +99,120 @@ def test_search_truncates_abstract(env, monkeypatch, paper_factory):
     assert len(server.search_papers("q")[0]["abstract"]) == 300
 
 
+# --- recommend_papers -------------------------------------------------------
+
+
+def test_recommend_requires_a_signal(env):
+    with pytest.raises(RuntimeError, match="No discovery signal"):
+        server.recommend_papers()
+
+
+def test_recommend_seeds_from_library(zotero_env, monkeypatch, paper_factory):
+    seen = {}
+    monkeypatch.setattr(
+        zotero_client, "seed_ids", lambda limit=10: ["ArXiv:2312.00752"]
+    )
+    monkeypatch.setattr(zotero_client, "known_identities", set)
+
+    def fake_recommend(seed_ids, pool, limit):
+        seen["seeds"], seen["pool"] = seed_ids, pool
+        return [paper_factory(title="Fresh Rec", arxiv_id="2606.1")]
+
+    monkeypatch.setattr(server.s2, "recommend", fake_recommend)
+    results = server.recommend_papers()
+    assert seen["seeds"] == ["ArXiv:2312.00752"]
+    assert seen["pool"] == "recent"
+    assert results[0]["title"] == "Fresh Rec"
+
+
+def test_recommend_all_time_pool(zotero_env, monkeypatch, paper_factory):
+    seen = {}
+    monkeypatch.setattr(zotero_client, "seed_ids", lambda limit=10: ["ArXiv:1"])
+    monkeypatch.setattr(zotero_client, "known_identities", set)
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: seen.setdefault("pool", pool) and [],
+    )
+    server.recommend_papers(recent_only=False, interests=["x"])
+    assert seen["pool"] == "all-cs"
+
+
+def test_recommend_excludes_library_papers(
+    zotero_env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(zotero_client, "seed_ids", lambda limit=10: ["ArXiv:1"])
+    monkeypatch.setattr(
+        zotero_client, "known_identities", lambda: {"2401.12345"}
+    )
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: [
+            paper_factory(),  # arxiv_id 2401.12345 — already in library
+            paper_factory(title="New One", arxiv_id="2606.1", doi=None),
+        ],
+    )
+    results = server.recommend_papers()
+    assert [r["title"] for r in results] == ["New One"]
+
+
+def test_recommend_blends_interests(env, monkeypatch, paper_factory):
+    monkeypatch.setattr(
+        openalex,
+        "search",
+        lambda q, max_results: [paper_factory(title=f"About {q}")],
+    )
+    results = server.recommend_papers(interests=["state space models"])
+    assert results[0]["title"] == "About state space models"
+
+
+def test_recommend_interleaves_arms(zotero_env, monkeypatch, paper_factory):
+    monkeypatch.setattr(zotero_client, "seed_ids", lambda limit=10: ["ArXiv:1"])
+    monkeypatch.setattr(zotero_client, "known_identities", set)
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: [
+            paper_factory(title=f"Graph {i}", arxiv_id=f"260{i}.1", doi=None)
+            for i in range(5)
+        ],
+    )
+    monkeypatch.setattr(
+        openalex,
+        "search",
+        lambda q, max_results: [
+            paper_factory(title="Keyword Hit", arxiv_id=None, doi="10.1/kw")
+        ],
+    )
+    results = server.recommend_papers(interests=["topic"], max_results=2)
+    # the keyword arm gets a fair slot instead of being pushed out
+    assert [r["title"] for r in results] == ["Graph 0", "Keyword Hit"]
+
+
+def test_recommend_explicit_seeds(env, monkeypatch, paper_factory):
+    seen = {}
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: seen.setdefault("seeds", ids) and [],
+    )
+    server.recommend_papers(seed_refs=["2401.12345"], interests=["x"])
+    assert seen["seeds"] == ["ArXiv:2401.12345"]
+
+
+def test_recommend_backend_down_reports(env, monkeypatch, paper_factory):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+
+    def boom(ids, pool, limit):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(server.s2, "recommend", boom)
+    with pytest.raises(RuntimeError, match="recommendation backend"):
+        server.recommend_papers(seed_refs=["2401.12345"])
+
+
 # --- send_papers -----------------------------------------------------------
 
 
