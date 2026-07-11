@@ -160,3 +160,8 @@ infrastructure. Recommendations via the
 [FastMCP](https://github.com/jlowin/fastmcp),
 [pyzotero](https://github.com/urschrei/pyzotero), and
 [httpx](https://github.com/encode/httpx).
+
+paperboy was built with [Claude Code](https://claude.com/claude-code):
+the tools were designed, tested, and refined by running Claude against
+the server and fixing what tripped it up. The commit history shows the
+process.
