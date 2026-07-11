@@ -114,9 +114,11 @@ gcloud auth login
 The script creates a dedicated GCP project, stores secrets in Secret
 Manager, runs the service under a least-privilege service account (its
 only permission is reading those secrets), and deploys with cost
-guardrails: `--max-instances=1`, scale-to-zero, and the `us-central1`
-free-tier region (2M requests/month — a personal server stays free).
-Finish with a $1 budget alert in the console for belt-and-braces.
+guardrails: `--max-instances=1`, scale-to-zero, the `us-central1`
+free-tier region (2M requests/month, shared across your billing
+account — a personal server stays free), and a $1/month budget with
+50%/100% alert thresholds that email your billing admins. Re-running
+the script is a clean sync (rotated secrets, no duplicates).
 
 Security model: when `PORT` is set (Cloud Run does this), paperboy
 serves Streamable HTTP at `/mcp` and **requires** `MCP_AUTH_TOKEN` — it
