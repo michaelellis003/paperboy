@@ -7,6 +7,7 @@ API key is needed; a contact email opts into the faster polite pool.
 """
 
 import re
+import time
 
 from .config import settings
 from .models import Paper
@@ -114,5 +115,11 @@ def search(query: str, max_results: int = 5) -> list[Paper]:
     if email:
         params["mailto"] = email
     response = client.get(_API, params=params)
+    if response.status_code == 429:
+        # One brief retry: OpenAlex throttles bursts, and a first-time
+        # user whose very first query dies to a 429 concludes the tool
+        # is broken.
+        time.sleep(1.5)
+        response = client.get(_API, params=params)
     response.raise_for_status()
     return [_parse_work(work) for work in response.json().get("results", [])]

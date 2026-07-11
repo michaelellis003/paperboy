@@ -2,10 +2,16 @@
 
 An MCP server that delivers research papers to your e-reader, with Zotero
 as the source of truth. Ask Claude for a reading list, then say "queue
-them and send to my Kindle." Works locally in Claude Code and Claude
-Desktop today. Remote use via Cloud Run works from Claude Code, the API,
-and wherever claude.ai's connector dialog supports bearer tokens (see
-"Connecting clients" below).
+them and send to my Kindle." (MCP is the plugin protocol Claude uses:
+this program runs on your machine or your cloud project, and Claude
+calls its tools during conversation.) Works locally in Claude Code and
+Claude Desktop today. Remote use via Cloud Run works from Claude Code,
+the API, and wherever claude.ai's connector dialog supports bearer
+tokens (see "Connecting clients" below).
+
+Zotero itself is optional: without it you can still search and send
+papers one-off. The reading queue, collections, and duplicate
+protection across sessions need it.
 
 ## Architecture
 
@@ -52,19 +58,6 @@ reMarkable (real cloud API) is on the roadmap.
 | `send_queue` | Send every unsent queue item (auto-split under email limits), then tag as sent |
 | `setup_status` | Report what's configured and what's missing (no secrets) so Claude can guide setup |
 
-## Development
-
-Managed with [uv](https://docs.astral.sh/uv/); linted and formatted with
-ruff (Google style), type-checked with [ty](https://docs.astral.sh/ty/),
-tested with pytest behind an enforced 80% coverage gate.
-
-```bash
-uv sync                    # install runtime + dev dependencies
-uv run pre-commit install  # ruff, ty, uv-lock, hygiene hooks on commit
-uv run pytest              # tests with coverage
-uv run ruff check src tests && uv run ty check
-```
-
 ## Setup
 
 Run the interactive wizard. It asks which e-reader you have, walks
@@ -100,7 +93,38 @@ If paperboy is added but half-configured, ask Claude to "check my
 paperboy setup". The `setup_status` tool reports what's missing and
 what to do next, without passing secrets through the chat.
 
-## Remote deployment (Cloud Run) — deploy your own
+## Development
+
+Managed with [uv](https://docs.astral.sh/uv/); linted and formatted with
+ruff (Google style), type-checked with [ty](https://docs.astral.sh/ty/),
+tested with pytest behind an enforced 80% coverage gate.
+
+```bash
+uv sync                    # install runtime + dev dependencies
+uv run pre-commit install  # ruff, ty, uv-lock, hygiene hooks on commit
+uv run pytest              # tests with coverage
+uv run ruff check src tests && uv run ty check
+```
+
+## Remote deployment (Cloud Run)
+
+### You were given a URL and a token
+
+If someone shared their deployment with you, this is your whole setup:
+
+```bash
+claude mcp add --transport http paperboy <URL>/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+The URL needs the `/mcp` path suffix. Treat the token like a password:
+it lets you act fully as the owner — send email from their address,
+deliver to their e-reader, and read and edit their Zotero library.
+There is no reduced-permission mode; if that's not what you both want,
+deploy your own instance (below). First calls after idle are quick;
+the service scales to zero but starts in about a second.
+
+### Deploy your own
 
 Every deployment is single-tenant. You run your own instance with your
 own secrets and token, and pay your own bill, which normally stays at

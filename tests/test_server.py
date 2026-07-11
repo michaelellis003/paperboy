@@ -93,10 +93,30 @@ def test_search_trims_long_author_lists(env, monkeypatch, paper_factory):
     assert result["authors"] == ["Author 0", "Author 1", "Author 2", "et al."]
 
 
-def test_search_truncates_abstract(env, monkeypatch, paper_factory):
-    paper = paper_factory(abstract="x" * 1000)
+def test_search_truncates_abstract_at_word_boundary(
+    env, monkeypatch, paper_factory
+):
+    paper = paper_factory(abstract="word " * 200)
     monkeypatch.setattr(openalex, "search", lambda q, max_results: [paper])
-    assert len(server.search_papers("q")[0]["abstract"]) == 300
+    abstract = server.search_papers("q")[0]["abstract"]
+    assert len(abstract) <= 304
+    assert abstract.endswith(" ...")
+    assert not abstract.removesuffix(" ...").endswith("wor")  # no mid-word cut
+
+
+def test_search_rate_limit_error_names_the_fix(env, monkeypatch):
+    request = httpx.Request("GET", "https://api.openalex.org/works")
+
+    def throttled(q, max_results):
+        raise httpx.HTTPStatusError(
+            "429",
+            request=request,
+            response=httpx.Response(429, request=request),
+        )
+
+    monkeypatch.setattr(openalex, "search", throttled)
+    with pytest.raises(RuntimeError, match="rate-limiting"):
+        server.search_papers("anything")
 
 
 # --- recommend_papers -------------------------------------------------------
@@ -189,6 +209,11 @@ def test_recommend_interleaves_arms(zotero_env, monkeypatch, paper_factory):
     result = server.recommend_papers(interests=["topic"], max_results=2)
     # the keyword arm gets a fair slot instead of being pushed out
     assert [r["title"] for r in result["picks"]] == ["Graph 0", "Keyword Hit"]
+    # and each pick says which arm produced it
+    assert [r["via"] for r in result["picks"]] == [
+        "citation-graph",
+        "interest-keyword",
+    ]
 
 
 def test_recommend_explicit_seeds(env, monkeypatch, paper_factory):

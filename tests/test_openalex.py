@@ -52,6 +52,25 @@ def test_date_from_arxiv_id():
     assert openalex._date_from_arxiv_id("not-an-id") is None
 
 
+def test_search_retries_once_on_429(env, monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429)
+        return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(
+        openalex,
+        "client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    monkeypatch.setattr(openalex.time, "sleep", lambda s: None)
+    assert openalex.search("throttled query") == []
+    assert len(calls) == 2
+
+
 def test_search_strips_wildcards_from_query(env, monkeypatch):
     def handler(request):
         # OpenAlex 400s on wildcard chars; they must never reach it

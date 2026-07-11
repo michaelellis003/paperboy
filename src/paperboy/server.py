@@ -39,6 +39,13 @@ mcp = FastMCP(
 )
 
 
+def _shorten(text: str, limit: int = 300) -> str:
+    """Truncate at a word boundary with a visible ellipsis."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + " ..."
+
+
 def _summary(paper: Paper) -> dict:
     authors = paper.authors[:3]
     if len(paper.authors) > 3:
@@ -51,7 +58,7 @@ def _summary(paper: Paper) -> dict:
         "title": paper.title,
         "authors": authors,
         "published": paper.published,
-        "abstract": paper.abstract[:300],
+        "abstract": _shorten(paper.abstract),
         "open_access_pdf": bool(paper.pdf_url),
     }
 
@@ -79,6 +86,17 @@ def search_papers(
             papers = arxiv.search(query, max_results=max_results)
         else:
             papers = openalex.search(query, max_results=max_results)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            raise RuntimeError(
+                "The search backend is rate-limiting this connection. "
+                "Wait a minute, or use source='arxiv' — rephrasing "
+                "won't help."
+            ) from exc
+        raise RuntimeError(
+            f"Search failed ({type(exc).__name__}): {exc} — retry, or "
+            "rephrase the query"
+        ) from exc
     except httpx.HTTPError as exc:
         raise RuntimeError(
             f"Search failed ({type(exc).__name__}): {exc} — retry, or "
@@ -119,10 +137,13 @@ def recommend_papers(
     the 100 most recently added items). max_results is capped at 20.
 
     Returns {"picks": [...], "problems": [...]}: picks carry refs for
-    send_papers / queue_papers; problems reports any discovery arm
-    that failed or seed that didn't resolve — ALWAYS relay problems,
-    or a stated interest may silently go uncovered. Present picks and
-    let the user choose; don't send unasked.
+    send_papers / queue_papers, and each pick has a ``via`` field —
+    'citation-graph' (related to the seeds/library) or
+    'interest-keyword' (matched a stated interest) — so the user can
+    see why it appeared. problems reports any discovery arm that
+    failed or seed that didn't resolve — ALWAYS relay problems, or a
+    stated interest may silently go uncovered. Present picks and let
+    the user choose; don't send unasked.
     """
     max_results = max(1, min(max_results, 20))
     problems: list[str] = []
@@ -172,24 +193,31 @@ def recommend_papers(
 
     # Interleave the arms so citation-graph results never starve the
     # conversation-interest results (or vice versa) within max_results.
-    candidates: list[Paper] = []
-    for pair in zip_longest(graph_arm, keyword_arm):
-        candidates.extend(paper for paper in pair if paper is not None)
+    # Each candidate keeps its arm so picks can say why they appeared.
+    candidates: list[tuple[Paper, str]] = []
+    for graph_paper, keyword_paper in zip_longest(graph_arm, keyword_arm):
+        if graph_paper is not None:
+            candidates.append((graph_paper, "citation-graph"))
+        if keyword_paper is not None:
+            candidates.append((keyword_paper, "interest-keyword"))
 
     known = (
         zotero_client.known_identities() if settings().zotero_enabled else set()
     )
-    fresh: list[Paper] = []
+    fresh: list[tuple[Paper, str]] = []
     seen: set[str] = set()
-    for paper in candidates:
+    for paper, via in candidates:
         keys = _identity_keys(paper)
         if keys & known or keys & seen:
             continue
         seen |= keys
-        fresh.append(paper)
+        fresh.append((paper, via))
 
     return {
-        "picks": [_summary(paper) for paper in fresh[:max_results]],
+        "picks": [
+            {**_summary(paper), "via": via}
+            for paper, via in fresh[:max_results]
+        ],
         "problems": problems,
     }
 
@@ -198,10 +226,17 @@ def _interest_results(phrase: str, problems: list[str]) -> list[Paper]:
     try:
         return openalex.search(phrase, max_results=5)
     except httpx.HTTPError as exc:
-        problems.append(
-            f"keyword search failed for {phrase!r} "
-            f"({type(exc).__name__}) — that interest is uncovered"
-        )
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 429:
+            problems.append(
+                f"keyword search rate-limited for {phrase!r} — that "
+                "interest is uncovered; wait a minute and retry"
+            )
+        else:
+            problems.append(
+                f"keyword search failed for {phrase!r} "
+                f"({type(exc).__name__}) — that interest is uncovered"
+            )
         return []
 
 
@@ -348,15 +383,16 @@ def _deliver(documents: list[tuple[str, bytes]]) -> tuple[str, set[str]]:
 
 @mcp.tool
 def send_papers(
-    papers: list[str],
+    refs: list[str],
     force: bool = False,
     dry_run: bool = False,
     collections: list[str] | None = None,
 ) -> str:
     """Send papers to the e-reader by arXiv id, DOI, or title.
 
-    Accepted refs: arXiv ids ('2401.12345', 'arXiv:...'), arXiv
-    abs/pdf URLs, DOIs, doi.org URLs, and paper titles. Publisher
+    ``refs`` accepts arXiv ids ('2401.12345', 'arXiv:...'), arXiv
+    abs/pdf URLs, DOIs, doi.org URLs, and paper titles — the same
+    ``ref`` values search and recommendation results carry. Publisher
     landing-page URLs are NOT resolvable — use the DOI or title.
     ``collections`` optionally files the papers into topical Zotero
     collections (created on demand) in addition to the Reading Queue —
@@ -375,7 +411,7 @@ def send_papers(
     Relay the full receipt — sizes, skips, and failures — to the user.
     """
     collections, collection_note = _clean_collections(collections)
-    resolved, problems = _resolve_all(papers)
+    resolved, problems = _resolve_all(refs)
 
     already_sent: list[Paper] = []
     already_sent_items: list[dict] = []
@@ -506,9 +542,7 @@ def send_papers(
 
 
 @mcp.tool
-def queue_papers(
-    papers: list[str], collections: list[str] | None = None
-) -> str:
+def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
     """Add papers to the Zotero Reading Queue without sending them.
 
     Accepts arXiv ids, DOIs, URLs, or paper titles. Papers already in
@@ -520,7 +554,7 @@ def queue_papers(
     """
     zotero_client.ensure_configured()
     collections, collection_note = _clean_collections(collections)
-    resolved, problems = _resolve_all(papers)
+    resolved, problems = _resolve_all(refs)
     new, existing, no_pdf = [], [], []
     for paper in resolved:
         item_key, created = zotero_client.add_paper(
