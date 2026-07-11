@@ -178,9 +178,34 @@ if ! gcloud projects get-iam-policy "$PROJECT_ID" \
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:${COMPUTE_SA}" \
     --role roles/cloudbuild.builds.builder --condition=None >/dev/null
-  # IAM grants propagate asynchronously; a fresh grant needs a moment.
-  sleep 15
+  # IAM grants propagate asynchronously; 15s proved marginal in
+  # practice (a first deploy raced it), so wait longer.
+  sleep 30
 fi
+
+# Cleanup policy: keep the 2 newest images, delete the rest after 30
+# days — otherwise every deploy accumulates ~90 MB toward the 0.5 GB
+# Artifact Registry free tier. Non-fatal if permissions are missing.
+CLEANUP_POLICY="$(mktemp)"
+cat > "$CLEANUP_POLICY" <<'JSON'
+[
+  {
+    "name": "keep-latest",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {"keepCount": 2}
+  },
+  {
+    "name": "delete-old",
+    "action": {"type": "Delete"},
+    "condition": {"olderThan": "2592000s"}
+  }
+]
+JSON
+gcloud artifacts repositories set-cleanup-policies cloud-run-source-deploy \
+  --location "$REGION" --project "$PROJECT_ID" \
+  --policy "$CLEANUP_POLICY" --no-dry-run >/dev/null 2>&1 \
+  || echo "    (could not set image cleanup policy — prune manually)"
+rm -f "$CLEANUP_POLICY"
 
 echo "==> Service account with least privilege"
 if ! gcloud iam service-accounts describe "$SA_EMAIL" \
@@ -216,6 +241,13 @@ done
 SET_ENV=()
 for var in "${PLAIN_VARS[@]}"; do
   value="${!var:-}"
+  # '|' is the deploy-flag list delimiter below; a value containing it
+  # would silently corrupt every env var. Fail loudly instead.
+  if [[ "$value" == *"|"* ]]; then
+    echo "ERROR: ${var} contains a '|' character, which the deploy" >&2
+    echo "flags cannot carry. Please remove it from .env." >&2
+    exit 1
+  fi
   [[ -n "$value" ]] && SET_ENV+=("${var}=${value}")
 done
 
@@ -236,9 +268,16 @@ emailed at 50% and 100% of \$1/month."
 # Idempotency keys off the budget's project filter (the API stores
 # project NUMBERS), never the display name, which can drift. The
 # anchored match prevents a longer project number false-positiving.
-if ! gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
-  --format="value(budgetFilter.projects)" 2>/dev/null \
-  | grep -Eq "projects/${PROJECT_NUMBER}(\$|[^0-9])"; then
+# If LISTING fails (create-but-not-list permissions), skip auto-create
+# rather than risk stacking duplicate budgets on every re-run.
+if ! BUDGET_LIST=$(gcloud billing budgets list \
+  --billing-account="$BILLING_ACCOUNT" \
+  --format="value(budgetFilter.projects)" 2>/dev/null); then
+  BUDGET_NOTE="Could not LIST budgets (missing Billing Account
+Viewer?) — auto-create skipped to avoid duplicates. Verify one
+exists: https://console.cloud.google.com/billing/budgets"
+elif ! grep -Eq "projects/${PROJECT_NUMBER}(\$|[^0-9])" \
+  <<<"$BUDGET_LIST"; then
   if ! gcloud billing budgets create \
     --billing-account="$BILLING_ACCOUNT" \
     --display-name="${SERVICE}-${PROJECT_ID}-guardrail" \

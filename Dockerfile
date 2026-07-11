@@ -7,6 +7,9 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
 ENV PATH="/app/.venv/bin:$PATH"
+# Defense-in-depth: the server needs no root privileges at runtime.
+RUN useradd --create-home --uid 1000 paperboy
+USER paperboy
 # Cloud Run injects PORT; paperboy switches to Streamable HTTP when it's set.
 ENV PORT=8080
 CMD ["paperboy"]

@@ -121,10 +121,17 @@ guardrails: `--max-instances=1`, scale-to-zero, the `us-central1`
 free-tier region (2M requests/month, shared across your billing
 account — a personal server stays free), and a $1/month budget with
 50%/100% alert thresholds that email your billing admins. Re-running
-the script is a clean sync (rotated secrets, no duplicates). One
-slow-burn item to know: each deploy stores a container image in
-Artifact Registry (~130 MB); past the 0.5 GB free tier that's pennies
-per month — prune old images occasionally if you redeploy often.
+the script is a clean sync (rotated secrets, no duplicates), and a
+cleanup policy keeps only the two newest container images so Artifact
+Registry storage can't creep past the free tier.
+
+Two small honesty notes for owners who audit their own project:
+`gcloud run services describe` may show a service-level "Max: 20" —
+that's a platform default; the deployed revision's max-instances=1
+governs (the effective limit is the lesser of the two). And rotating
+a secret leaves the old version enabled in Secret Manager — disable
+superseded versions if you rotate often (past 6 active versions,
+Secret Manager bills ~$0.06/version/month).
 
 Security model: when `PORT` is set (Cloud Run does this), paperboy
 serves Streamable HTTP at `/mcp` and **requires** `MCP_AUTH_TOKEN` — it

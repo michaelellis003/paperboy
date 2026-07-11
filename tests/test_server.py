@@ -445,6 +445,30 @@ def test_send_papers_survives_dead_pdf_link(
     assert "download failed: Dead Link" in receipt
 
 
+def test_download_failure_notes_queued_retry_with_zotero(
+    zotero_env, monkeypatch, paper_factory, sent_documents
+):
+    good = paper_factory()
+    dead = paper_factory(
+        title="Dead Link",
+        arxiv_id="9999.9",
+        doi=None,
+        pdf_url="https://mirror.invalid/x.pdf",
+    )
+    papers = iter([good, dead])
+    monkeypatch.setattr(resolver, "resolve", lambda ref: next(papers))
+
+    def fake_download(paper):
+        if paper.title == "Dead Link":
+            raise ValueError("404")
+        return b"%PDF"
+
+    monkeypatch.setattr(resolver, "download_pdf", fake_download)
+    receipt = server.send_papers(["2401.12345", "9999.9"])
+    assert "download failed: Dead Link" in receipt
+    assert "queued unsent for retry" in receipt
+
+
 def test_send_papers_records_in_zotero(
     zotero_env, monkeypatch, paper_factory, sent_documents, no_download
 ):

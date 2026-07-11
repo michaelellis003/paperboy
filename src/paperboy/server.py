@@ -431,6 +431,13 @@ def send_papers(
             zotero_client.file_item(item, collections)
 
     downloaded, failures = _download_all(sendable)
+    if failures and settings().zotero_enabled:
+        # Failed downloads are still recorded in the queue below, so a
+        # later send_queue retries them — say so instead of leaving
+        # the failure looking final.
+        failures = [
+            f"{failure} — queued unsent for retry" for failure in failures
+        ]
     problems.extend(failures)
 
     if not downloaded:
