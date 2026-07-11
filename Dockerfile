@@ -10,6 +10,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Defense-in-depth: the server needs no root privileges at runtime.
 RUN useradd --create-home --uid 1000 paperboy
 USER paperboy
-# Cloud Run injects PORT; paperboy switches to Streamable HTTP when it's set.
-ENV PORT=8080
+# No baked-in PORT: Cloud Run injects it at runtime (switching the
+# server to Streamable HTTP), while a bare `docker run` speaks stdio —
+# which is what registry inspectors like Glama's expect.
 CMD ["paperboy"]
