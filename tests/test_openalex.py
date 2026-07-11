@@ -41,6 +41,15 @@ def test_search_parses_work(env, monkeypatch):
     assert paper.doi == "10.48550/arxiv.1706.03762"
     assert paper.arxiv_id == "1706.03762"
     assert paper.pdf_url == "https://arxiv.org/pdf/1706.03762"
+    # date derived from the arXiv id, not OpenAlex's latest-version date
+    assert paper.published == "2017-06"
+
+
+def test_date_from_arxiv_id():
+    assert openalex._date_from_arxiv_id("2401.12345") == "2024-01"
+    assert openalex._date_from_arxiv_id("math/0309136") == "2003-09"
+    assert openalex._date_from_arxiv_id("hep-th/9701001") == "1997-01"
+    assert openalex._date_from_arxiv_id("not-an-id") is None
 
 
 def test_search_strips_wildcards_from_query(env, monkeypatch):

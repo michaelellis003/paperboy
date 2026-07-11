@@ -56,9 +56,10 @@ def search_papers(
     """Search for papers across the scholarly literature.
 
     ``source`` is 'all' (OpenAlex: journals, conferences, and preprint
-    servers including arXiv — usually the better ranking, even for
-    arXiv-native topics) or 'arxiv' (arXiv's own search; only better
-    for very recent preprints); unknown values fall back to 'all'.
+    servers including arXiv — broad coverage, but ranking can miss on
+    arXiv-native topics) or 'arxiv' (arXiv's own search — better for
+    recent preprints or when 'all' returns off-topic results); unknown
+    values fall back to 'all'.
     ``max_results`` is capped at 25. Each result has a ``ref`` (arXiv
     id, DOI, or exact title) to pass to send_papers / queue_papers.
     ``open_access_pdf`` means an OA PDF link was found; delivery can

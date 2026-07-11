@@ -73,7 +73,7 @@ How much setup depends entirely on the device:
 |---|---|
 | Kindle | 2 — Send-to-Kindle address + an SMTP app password |
 | PocketBook | 2 — Send-to-PocketBook address + an SMTP app password |
-| Kobo | a Dropbox app (key/secret + one OAuth approval) |
+| Kobo | a Dropbox app (key/secret + one OAuth approval) + a contact email |
 | + Zotero queue (optional) | 1 — a Zotero API key (library ID auto-detected) |
 | + claude.ai / mobile (optional) | auto-generated token + a cloud deploy |
 

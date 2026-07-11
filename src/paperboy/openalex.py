@@ -30,6 +30,23 @@ def _abstract_from_inverted_index(index: dict | None) -> str:
     return " ".join(word for _, word in sorted(positions))
 
 
+def _date_from_arxiv_id(arxiv_id: str) -> str | None:
+    """Derive YYYY-MM from an arXiv id.
+
+    OpenAlex often reports the latest version's date (e.g. 2025 for a
+    2017 paper), which misleads recency-based picks; the id itself
+    encodes the true submission month.
+    """
+    match = re.match(r"^(\d{2})(\d{2})\.\d{4,5}$", arxiv_id)
+    if not match:
+        match = re.match(r"^[a-z-]+/(\d{2})(\d{2})\d{3}$", arxiv_id)
+    if not match:
+        return None
+    yy, mm = match.groups()
+    century = "19" if int(yy) >= 91 else "20"
+    return f"{century}{yy}-{mm}"
+
+
 def _arxiv_id(work: dict) -> str | None:
     locations = [
         work.get("primary_location"),
@@ -71,7 +88,11 @@ def _parse_work(work: dict) -> Paper:
         abstract=_abstract_from_inverted_index(
             work.get("abstract_inverted_index")
         ),
-        published=work.get("publication_date") or "",
+        published=(
+            (arxiv_id and _date_from_arxiv_id(arxiv_id))
+            or work.get("publication_date")
+            or ""
+        ),
         url=url,
         pdf_url=pdf_url,
         arxiv_id=arxiv_id,
