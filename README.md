@@ -10,7 +10,7 @@ as the source of truth. Ask Claude for a reading list, then say "queue
 them and send to my Kindle." (MCP is the plugin protocol Claude uses:
 this program runs on your machine or your cloud project, and Claude
 calls its tools during conversation.) Works locally in Claude Code and
-Claude Desktop today; remote use via Cloud Run is covered in
+Claude Desktop; remote use via Cloud Run is covered in
 [docs/deploy.md](docs/deploy.md).
 
 Zotero itself is optional: without it you can still search and send
