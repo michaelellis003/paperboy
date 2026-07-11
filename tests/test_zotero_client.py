@@ -44,6 +44,9 @@ class FakeZotero:
     def add_tags(self, item, tag):
         self.tagged.append((item["key"], tag))
 
+    def addto_collection(self, key, item):
+        item["data"].setdefault("collections", []).append(key)
+
     def delete_item(self, item):
         self.deleted.append(item["key"])
         self.items = [i for i in self.items if i["key"] != item["key"]]
@@ -260,6 +263,75 @@ def test_remove_by_refs_matches_archive_id(fake_api):
     removed, misses = zotero_client.remove_by_refs(["arXiv:2401.12345"])
     assert [entry["title"] for entry in removed] == ["Alpha"]
     assert misses == []
+
+
+def test_list_collections(fake_api):
+    fake_api.existing_collections = [
+        {
+            "key": "P",
+            "data": {"name": "ML", "parentCollection": None},
+            "meta": {"numItems": 3},
+        },
+        {
+            "key": "C",
+            "data": {"name": "Transformers", "parentCollection": "P"},
+            "meta": {"numItems": 1},
+        },
+    ]
+    assert zotero_client.list_collections() == [
+        {"name": "ML", "items": 3, "parent": None},
+        {"name": "Transformers", "items": 1, "parent": "ML"},
+    ]
+
+
+def test_collection_key_case_insensitive_and_create(fake_api):
+    fake_api.existing_collections = [
+        {"key": "K1", "data": {"name": "Bayesian Methods"}}
+    ]
+    assert zotero_client.collection_key("bayesian methods") == "K1"
+    assert zotero_client.collection_key("New Topic") is None
+    assert zotero_client.collection_key("New Topic", create=True) == "NEWCOLL"
+
+
+def test_add_paper_files_into_extra_collections(fake_api, paper_factory):
+    _, created = zotero_client.add_paper(
+        paper_factory(), collections=["Bayesian Methods"]
+    )
+    assert created is True
+    # new item lands in the queue AND the topical collection
+    assert fake_api.created[0]["collections"] == ["COLL", "NEWCOLL"]
+
+
+def test_add_existing_paper_gains_collections(fake_api, paper_factory):
+    fake_api.items = [
+        {
+            "key": "EXISTING",
+            "data": {
+                "url": "https://arxiv.org/abs/2401.12345",
+                "collections": ["COLL"],
+            },
+        }
+    ]
+    key, created = zotero_client.add_paper(
+        paper_factory(), collections=["Topical"]
+    )
+    assert (key, created) == ("EXISTING", False)
+    assert fake_api.items[0]["data"]["collections"] == ["COLL", "NEWCOLL"]
+
+
+def test_file_by_refs(fake_api):
+    fake_api.items = [
+        {
+            "key": "A",
+            "data": {"title": "Alpha", "DOI": "10.1000/alpha"},
+        }
+    ]
+    filed, misses = zotero_client.file_by_refs(
+        ["10.1000/alpha", "missing-ref"], "Topical"
+    )
+    assert filed == ["Alpha"]
+    assert misses == ["missing-ref"]
+    assert fake_api.items[0]["data"]["collections"] == ["NEWCOLL"]
 
 
 def test_creates_missing_collection(fake_api, paper_factory):

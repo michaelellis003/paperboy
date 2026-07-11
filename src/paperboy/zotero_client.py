@@ -37,15 +37,45 @@ def _api() -> zotero.Zotero:
     )
 
 
+def _collections_raw() -> list[dict]:
+    api = _api()
+    return api.everything(api.collections())
+
+
+def collection_key(name: str, create: bool = False) -> str | None:
+    """Find a collection key by name (case-insensitive).
+
+    With ``create=True`` a missing collection is created (top-level).
+    """
+    wanted = name.strip()
+    for collection in _collections_raw():
+        if collection["data"]["name"].lower() == wanted.lower():
+            return collection["key"]
+    if not create:
+        return None
+    result = _api().create_collections([{"name": wanted}])
+    return result["successful"]["0"]["key"]
+
+
+def list_collections() -> list[dict]:
+    """Every collection with name, item count, and parent name."""
+    raw = _collections_raw()
+    names = {c["key"]: c["data"]["name"] for c in raw}
+    return [
+        {
+            "name": c["data"]["name"],
+            "items": c.get("meta", {}).get("numItems", 0),
+            "parent": names.get(c["data"].get("parentCollection") or ""),
+        }
+        for c in raw
+    ]
+
+
 def _queue_collection_key() -> str:
     """Find or create the Reading Queue collection."""
-    cfg = settings()
-    api = _api()
-    for collection in api.everything(api.collections()):
-        if collection["data"]["name"] == cfg.reading_queue_collection:
-            return collection["key"]
-    result = api.create_collections([{"name": cfg.reading_queue_collection}])
-    return result["successful"]["0"]["key"]
+    key = collection_key(settings().reading_queue_collection, create=True)
+    assert key is not None  # create=True always yields a key
+    return key
 
 
 def _queue_items() -> list[dict]:
@@ -88,18 +118,34 @@ def is_sent(item: dict) -> bool:
     return settings().sent_tag in _tags(item)
 
 
-def add_paper(paper: Paper) -> tuple[str, bool]:
+def _add_to_collection(item: dict, key: str) -> None:
+    if key not in item["data"].get("collections", []):
+        _api().addto_collection(key, item)
+
+
+def add_paper(
+    paper: Paper, collections: list[str] | None = None
+) -> tuple[str, bool]:
     """Add a paper to the Reading Queue, deduplicating by arXiv id/DOI.
 
     arXiv papers become ``preprint`` items; DOI-resolved papers become
-    ``journalArticle`` items. Returns (item key, created) where created
-    is False when the paper was already in the queue.
+    ``journalArticle`` items. ``collections`` names extra topical
+    collections to file into (created on demand) — Zotero items can
+    live in many collections, so the queue membership is unaffected.
+    Returns (item key, created) where created is False when the paper
+    was already in the queue.
     """
     api = _api()
-    collection_key = _queue_collection_key()
+    queue_key = _queue_collection_key()
+    extra_keys = [
+        collection_key(name, create=True) for name in collections or []
+    ]
 
     existing = find_item(paper)
     if existing:
+        for key in extra_keys:
+            if key:
+                _add_to_collection(existing, key)
         return existing["key"], False
 
     if paper.arxiv_id:
@@ -117,12 +163,37 @@ def add_paper(paper: Paper) -> tuple[str, bool]:
     template["url"] = paper.url
     if paper.doi:
         template["DOI"] = paper.doi
-    template["collections"] = [collection_key]
+    template["collections"] = [queue_key, *[k for k in extra_keys if k]]
 
     result = api.create_items([template])
     if result["failed"]:
         raise RuntimeError(f"Zotero rejected item: {result['failed']}")
     return result["successful"]["0"]["key"], True
+
+
+def file_by_refs(
+    refs: list[str], collection_name: str
+) -> tuple[list[str], list[str]]:
+    """File queue items into a collection (created on demand).
+
+    Matching is the same exact-only logic as removal. Returns (filed
+    titles, refs that matched nothing).
+    """
+    key = collection_key(collection_name, create=True)
+    items = _queue_items()
+    filed, misses = [], []
+    for ref in refs:
+        match = next(
+            (item for item in items if _ref_matches(ref, item["data"])),
+            None,
+        )
+        if match is None:
+            misses.append(ref)
+            continue
+        if key:
+            _add_to_collection(match, key)
+        filed.append(match["data"].get("title", match["key"]))
+    return filed, misses
 
 
 def unsent_queue_items() -> list[dict]:

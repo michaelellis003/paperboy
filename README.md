@@ -11,6 +11,11 @@ spoke. State lives in Zotero, not here:
 
 - Papers land in a **Reading Queue** collection (created on demand).
 - Delivery is recorded by tagging the item `sent-to-ereader`.
+- Papers can additionally be filed into **topical collections** (Zotero
+  items live in many collections at once, so queue state is never
+  disturbed). Claude proposes a collection from the paper's topic and
+  your existing collection names — and asks you when the fit is
+  ambiguous rather than guessing.
 - The server itself is stateless — safe to redeploy, no database.
 
 Papers are resolved by arXiv id (arXiv Atom API), DOI (Crossref metadata
@@ -37,7 +42,9 @@ reMarkable (real cloud API) is on the roadmap.
 |---|---|
 | `search_papers` | Search OpenAlex (general) or arXiv (`source="arxiv"`); results carry a `ref` and an `open_access_pdf` flag |
 | `send_papers` | One-off send by arXiv id, DOI, URL, or title (also records in Zotero if configured) |
-| `queue_papers` | Add papers to the Zotero Reading Queue without sending |
+| `queue_papers` | Add papers to the Zotero Reading Queue without sending (optionally filed into topical collections) |
+| `list_collections` | List Zotero collections so Claude can propose where to file a paper — or ask you |
+| `file_papers` | File queued papers into a topical collection (created on demand; queue membership unaffected) |
 | `list_queue` | Show the queue with per-item status (unsent / sent / no-open-access-pdf) |
 | `remove_from_queue` | Delete queue items by exact ref or title |
 | `send_queue` | Send every unsent queue item (auto-split under email limits), then tag as sent |

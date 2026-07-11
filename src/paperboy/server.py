@@ -20,14 +20,17 @@ mcp = FastMCP(
     "paperboy",
     instructions=(
         "Delivers research papers to the user's e-reader (Kindle, Kobo, "
-        "PocketBook, ...) and organizes them in a Zotero reading queue. "
-        "Papers are referenced by arXiv id, DOI, arXiv/doi.org URL, or "
-        "title (publisher landing URLs won't resolve) — so a reading "
-        "list from research can be sent directly. Use "
-        "send_papers when the user picks specific papers; send_queue "
-        "flushes EVERY unsent queued item, so check list_queue first. "
-        "Always relay delivery receipts — including sizes, skipped "
-        "papers, and failures — back to the user."
+        "PocketBook, ...) and organizes them in Zotero. Papers are "
+        "referenced by arXiv id, DOI, arXiv/doi.org URL, or title "
+        "(publisher landing URLs won't resolve) — so a reading list "
+        "from research can be sent directly. Use send_papers when the "
+        "user picks specific papers; send_queue flushes EVERY unsent "
+        "queued item, so check list_queue first. Organization: when "
+        "queueing/sending new papers, check list_collections and pass "
+        "collections=[...] to file them topically — propose a fit from "
+        "the paper's topic, and ASK THE USER when the fit is ambiguous "
+        "rather than guessing. Always relay delivery receipts — "
+        "including sizes, skipped papers, and failures — to the user."
     ),
 )
 
@@ -201,13 +204,19 @@ def _deliver(documents: list[tuple[str, bytes]]) -> tuple[str, set[str]]:
 
 @mcp.tool
 def send_papers(
-    papers: list[str], force: bool = False, dry_run: bool = False
+    papers: list[str],
+    force: bool = False,
+    dry_run: bool = False,
+    collections: list[str] | None = None,
 ) -> str:
     """Send papers to the e-reader by arXiv id, DOI, or title.
 
     Accepted refs: arXiv ids ('2401.12345', 'arXiv:...'), arXiv
     abs/pdf URLs, DOIs, doi.org URLs, and paper titles. Publisher
     landing-page URLs are NOT resolvable — use the DOI or title.
+    ``collections`` optionally files the papers into topical Zotero
+    collections (created on demand) in addition to the Reading Queue —
+    check list_collections and ask the user when placement is unclear.
 
     Refs are deduplicated, and papers already tagged as sent in Zotero
     are skipped unless force=True. Large batches are split
@@ -274,7 +283,9 @@ def send_papers(
         queued_note = ""
         if settings().zotero_enabled and resolved:
             for paper in resolved:
-                item_key, _ = zotero_client.add_paper(paper)
+                item_key, _ = zotero_client.add_paper(
+                    paper, collections=collections
+                )
                 if not paper.pdf_url:
                     zotero_client.mark_no_pdf(item_key)
             queued_note = " (queued unsent in Zotero Reading Queue)"
@@ -297,12 +308,16 @@ def send_papers(
 
     if settings().zotero_enabled:
         for paper in resolved:
-            item_key, _ = zotero_client.add_paper(paper)
+            item_key, _ = zotero_client.add_paper(
+                paper, collections=collections
+            )
             if paper.safe_filename in delivered:
                 zotero_client.mark_sent(item_key)
             elif not paper.pdf_url:
                 zotero_client.mark_no_pdf(item_key)
         receipt += " (recorded in Zotero Reading Queue)"
+        if collections:
+            receipt += f" (filed under: {'; '.join(collections)})"
     if no_pdf:
         titles = "; ".join(paper.title for paper in no_pdf)
         note = (
@@ -320,18 +335,25 @@ def send_papers(
 
 
 @mcp.tool
-def queue_papers(papers: list[str]) -> str:
+def queue_papers(
+    papers: list[str], collections: list[str] | None = None
+) -> str:
     """Add papers to the Zotero Reading Queue without sending them.
 
     Accepts arXiv ids, DOIs, URLs, or paper titles. Papers already in
-    the queue are reported as such, not re-added. Unresolvable papers
-    are reported back — relay those to the user.
+    the queue are reported as such, not re-added. ``collections``
+    optionally files the papers into topical Zotero collections
+    (created on demand) as well — check list_collections and ask the
+    user when placement is unclear. Unresolvable papers are reported
+    back — relay those to the user.
     """
     zotero_client.ensure_configured()
     resolved, problems = _resolve_all(papers)
     new, existing, no_pdf = [], [], []
     for paper in resolved:
-        item_key, created = zotero_client.add_paper(paper)
+        item_key, created = zotero_client.add_paper(
+            paper, collections=collections
+        )
         (new if created else existing).append(paper.title)
         if not paper.pdf_url:
             zotero_client.mark_no_pdf(item_key)
@@ -340,6 +362,8 @@ def queue_papers(papers: list[str]) -> str:
         return "Nothing was queued. " + "; ".join(problems)
     queue = settings().reading_queue_collection
     parts = [f"Queued {len(new)} new paper(s) in '{queue}'"]
+    if collections:
+        parts[0] += f" (filed under: {'; '.join(collections)})"
     if new:
         parts[0] += ": " + "; ".join(new)
     if existing:
@@ -353,6 +377,38 @@ def queue_papers(papers: list[str]) -> str:
     if problems:
         parts.append("; ".join(problems))
     return " | ".join(parts)
+
+
+@mcp.tool
+def list_collections() -> list[dict]:
+    """List the user's Zotero collections (name, item count, parent).
+
+    Check this before queueing or sending new papers: if a topical
+    collection clearly fits the paper, pass it via collections=[...];
+    if several could fit or none do, ask the user where to file —
+    never guess silently. Naming a new collection in other tools
+    creates it on demand.
+    """
+    zotero_client.ensure_configured()
+    return zotero_client.list_collections()
+
+
+@mcp.tool
+def file_papers(refs: list[str], collection: str) -> str:
+    """File queued papers into a Zotero collection (created if missing).
+
+    Items stay in the Reading Queue — Zotero items can live in many
+    collections — so delivery state is unaffected. Refs match like
+    remove_from_queue: exact arXiv id, DOI, URL, or title.
+    """
+    zotero_client.ensure_configured()
+    filed, misses = zotero_client.file_by_refs(refs, collection)
+    receipt = f"Filed {len(filed)} item(s) under '{collection}'"
+    if filed:
+        receipt += ": " + "; ".join(filed)
+    if misses:
+        receipt += f" | Not found in queue: {'; '.join(misses)}"
+    return receipt
 
 
 @mcp.tool

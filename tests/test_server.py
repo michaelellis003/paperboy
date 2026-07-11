@@ -29,7 +29,9 @@ def zotero_env(env, monkeypatch):
 
     env.setattr(paperboy.config, "_settings", None)
     monkeypatch.setattr(zotero_client, "find_item", lambda p: None)
-    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
+    monkeypatch.setattr(
+        zotero_client, "add_paper", lambda p, collections=None: ("KEY", True)
+    )
     monkeypatch.setattr(zotero_client, "mark_sent", lambda k: None)
     monkeypatch.setattr(zotero_client, "mark_no_pdf", lambda k: None)
     return env
@@ -131,7 +133,9 @@ def test_send_papers_all_paywalled_still_queues(
         resolver, "resolve", lambda ref: paper_factory(pdf_url=None)
     )
     monkeypatch.setattr(
-        zotero_client, "add_paper", lambda p: (added.append(p), "K", True)[1:]
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: (added.append(p), "K", True)[1:],
     )
     monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
     receipt = server.send_papers(["10.1/x"])
@@ -288,7 +292,7 @@ def test_send_papers_records_in_zotero(
 ):
     added, marked = [], []
 
-    def fake_add(paper):
+    def fake_add(paper, collections=None):
         added.append(paper)
         return "KEY", True
 
@@ -385,7 +389,9 @@ def zotero_ok(monkeypatch):
 
 def test_queue_papers(env, zotero_ok, monkeypatch, paper_factory):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
-    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
+    monkeypatch.setattr(
+        zotero_client, "add_paper", lambda p, collections=None: ("KEY", True)
+    )
     receipt = server.queue_papers(["2401.12345"])
     assert "Queued 1 new paper(s) in 'Reading Queue'" in receipt
 
@@ -394,7 +400,9 @@ def test_queue_papers_reports_existing(
     env, zotero_ok, monkeypatch, paper_factory
 ):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
-    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", False))
+    monkeypatch.setattr(
+        zotero_client, "add_paper", lambda p, collections=None: ("KEY", False)
+    )
     receipt = server.queue_papers(["2401.12345"])
     assert "Queued 0 new paper(s)" in receipt
     assert "already in queue: A Test Paper" in receipt
@@ -416,7 +424,9 @@ def test_queue_papers_tags_no_pdf_at_queue_time(
     monkeypatch.setattr(
         resolver, "resolve", lambda ref: paper_factory(pdf_url=None)
     )
-    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
+    monkeypatch.setattr(
+        zotero_client, "add_paper", lambda p, collections=None: ("KEY", True)
+    )
     monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
     receipt = server.queue_papers(["10.1/x"])
     assert tagged == ["KEY"]
@@ -433,6 +443,58 @@ def test_queue_papers_fails_fast_without_zotero(env, monkeypatch):
 
 
 # --- list / remove ---------------------------------------------------------
+
+
+def test_list_collections_tool(env, zotero_ok, monkeypatch):
+    entries = [{"name": "ML", "items": 3, "parent": None}]
+    monkeypatch.setattr(zotero_client, "list_collections", lambda: entries)
+    assert server.list_collections() == entries
+
+
+def test_file_papers_tool(env, zotero_ok, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "file_by_refs",
+        lambda refs, name: (["Paper A"], ["nope"]),
+    )
+    receipt = server.file_papers(["10.1/a", "nope"], "Bayesian Methods")
+    assert "Filed 1 item(s) under 'Bayesian Methods'" in receipt
+    assert "Paper A" in receipt
+    assert "Not found in queue: nope" in receipt
+
+
+def test_queue_papers_files_into_collections(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    seen = {}
+
+    def fake_add(paper, collections=None):
+        seen["collections"] = collections
+        return "KEY", True
+
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(zotero_client, "add_paper", fake_add)
+    receipt = server.queue_papers(
+        ["2401.12345"], collections=["State Space Models"]
+    )
+    assert seen["collections"] == ["State Space Models"]
+    assert "filed under: State Space Models" in receipt
+
+
+def test_send_papers_files_into_collections(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    seen = {}
+
+    def fake_add(paper, collections=None):
+        seen["collections"] = collections
+        return "KEY", True
+
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(zotero_client, "add_paper", fake_add)
+    receipt = server.send_papers(["2401.12345"], collections=["ML"])
+    assert seen["collections"] == ["ML"]
+    assert "filed under: ML" in receipt
 
 
 def test_list_queue_tool(env, monkeypatch):
