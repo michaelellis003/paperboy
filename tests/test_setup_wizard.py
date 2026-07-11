@@ -157,6 +157,7 @@ def test_run_kindle_flow(tmp_path, monkeypatch):
             "me@example.com",  # sender
             "n",  # open app-passwords page?
             "smtp.example.com",  # SMTP host
+            "465x",  # SMTP port: non-numeric, re-prompted
             "465",  # SMTP port
             "me@example.com",  # SMTP user
             "y",  # set up Zotero?

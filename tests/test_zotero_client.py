@@ -215,9 +215,24 @@ def test_remove_by_refs(fake_api):
     removed, misses = zotero_client.remove_by_refs(
         ["10.1000/alpha", "beta", "nonexistent"]
     )
-    assert removed == ["Alpha", "Beta"]
+    assert [entry["title"] for entry in removed] == ["Alpha", "Beta"]
     assert misses == ["nonexistent"]
     assert fake_api.deleted == ["A", "B"]
+
+
+def test_remove_by_refs_reports_sent_state(env, fake_api):
+    fake_api.items = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Already Read",
+                "DOI": "10.1000/read",
+                "tags": [{"tag": "sent-to-ereader"}],
+            },
+        }
+    ]
+    removed, _ = zotero_client.remove_by_refs(["10.1000/read"])
+    assert removed == [{"title": "Already Read", "was_sent": True}]
 
 
 def test_remove_by_refs_rejects_empty_and_partial(fake_api):
@@ -243,7 +258,8 @@ def test_remove_by_refs_matches_archive_id(fake_api):
         }
     ]
     removed, misses = zotero_client.remove_by_refs(["arXiv:2401.12345"])
-    assert removed == ["Alpha"] and misses == []
+    assert [entry["title"] for entry in removed] == ["Alpha"]
+    assert misses == []
 
 
 def test_creates_missing_collection(fake_api, paper_factory):

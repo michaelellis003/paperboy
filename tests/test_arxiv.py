@@ -78,3 +78,18 @@ def test_search_parses_entries(monkeypatch):
     results = arxiv.search("attention", max_results=3)
     assert len(results) == 1
     assert results[0].arxiv_id == "2401.12345"
+
+
+def test_search_strips_query_syntax_characters(monkeypatch):
+    def handler(request):
+        query = request.url.params["search_query"]
+        assert ":" not in query.removeprefix("all:")
+        assert "?" not in query and '"' not in query
+        return httpx.Response(200, text=EMPTY_FEED)
+
+    monkeypatch.setattr(
+        arxiv,
+        "client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    arxiv.search('BERT: "Pre-training" of Deep Transformers?')

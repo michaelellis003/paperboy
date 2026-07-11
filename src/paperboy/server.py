@@ -65,7 +65,7 @@ def search_papers(
     still fail if the link is dead (arXiv-hosted papers are the most
     reliable).
     """
-    max_results = min(max_results, 25)
+    max_results = max(1, min(max_results, 25))
     try:
         if source == "arxiv":
             papers = arxiv.search(query, max_results=max_results)
@@ -216,8 +216,9 @@ def send_papers(
 
     Papers without an open-access PDF are not sent; if Zotero is
     configured they are still queued (tagged no-oa-pdf) so they can be
-    delivered manually later. Relay the full receipt — sizes, skips,
-    and failures — to the user.
+    delivered manually later. Without Zotero there is NO cross-call
+    duplicate protection — re-sending the same ref ships another copy.
+    Relay the full receipt — sizes, skips, and failures — to the user.
     """
     resolved, problems = _resolve_all(papers)
 
@@ -370,12 +371,19 @@ def remove_from_queue(refs: list[str]) -> str:
 
     Matches each ref (arXiv id, DOI, URL, or exact title) against
     queue items and deletes matches from the library. This does not
-    delete anything from the e-reader.
+    delete anything from the e-reader — but it DOES erase the item's
+    sent-state, so sending the same paper later will deliver it again.
     """
     removed, misses = zotero_client.remove_by_refs(refs)
     receipt = f"Removed {len(removed)} item(s) from the queue"
     if removed:
-        receipt += ": " + "; ".join(removed)
+        receipt += ": " + "; ".join(entry["title"] for entry in removed)
+    forgotten = [entry["title"] for entry in removed if entry["was_sent"]]
+    if forgotten:
+        receipt += (
+            " | note: their sent-state is erased — sending these again "
+            f"later WILL re-deliver: {'; '.join(forgotten)}"
+        )
     if misses:
         receipt += f" | Not found in queue: {'; '.join(misses)}"
     return receipt
@@ -476,10 +484,18 @@ def setup_status() -> dict:
             cfg.dropbox_refresh_token,
         ]
     )
-    delivery_ready = (
-        email_ready if cfg.delivery_method == "email" else dropbox_ready
-    )
+    if cfg.delivery_method == "email":
+        delivery_ready = email_ready
+    elif cfg.delivery_method == "dropbox":
+        delivery_ready = dropbox_ready
+    else:
+        delivery_ready = False
     next_steps = []
+    if cfg.delivery_method not in ("email", "dropbox"):
+        next_steps.append(
+            f"DELIVERY_METHOD is {cfg.delivery_method!r} — it must be "
+            "'email' or 'dropbox'."
+        )
     if not delivery_ready:
         next_steps.append(
             "Delivery is not configured — run 'paperboy setup' in a "

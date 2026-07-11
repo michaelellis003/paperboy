@@ -8,6 +8,7 @@ the best hit closely matches the requested title — a wrong paper on
 the e-reader is worse than a lookup failure.
 """
 
+import contextlib
 import difflib
 
 import httpx
@@ -19,15 +20,28 @@ from .net import client
 _TITLE_MATCH_THRESHOLD = 0.8
 
 
+def _best_title_match(ref: str, candidates: list[Paper]) -> Paper | None:
+    best, best_ratio = None, 0.0
+    for paper in candidates:
+        ratio = difflib.SequenceMatcher(
+            None, normalize_title(ref), normalize_title(paper.title)
+        ).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = paper, ratio
+    return best if best_ratio >= _TITLE_MATCH_THRESHOLD else None
+
+
 def _resolve_title(ref: str) -> Paper | None:
-    matches = openalex.search(ref, max_results=1)
-    if not matches:
-        return None
-    hit = matches[0]
-    ratio = difflib.SequenceMatcher(
-        None, normalize_title(ref), normalize_title(hit.title)
-    ).ratio()
-    if ratio < _TITLE_MATCH_THRESHOLD:
+    # Scan several hits: relevance ranking sometimes puts a derivative
+    # work first (e.g. Sentence-BERT above BERT for the exact BERT
+    # title), and arXiv covers canonical records OpenAlex ranks poorly.
+    hit = None
+    with contextlib.suppress(httpx.HTTPError):
+        hit = _best_title_match(ref, openalex.search(ref, max_results=5))
+    if hit is None:
+        with contextlib.suppress(httpx.HTTPError):
+            hit = _best_title_match(ref, arxiv.search(ref, max_results=5))
+    if hit is None:
         return None
     # OpenAlex carries junk duplicate records (wrong DOI/date) for some
     # papers; when the hit is on arXiv, re-fetch canonical metadata so

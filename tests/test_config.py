@@ -50,3 +50,11 @@ def test_polite_email_falls_back_to_from_email(env):
 
 def test_settings_cached(env):
     assert paperboy.config.settings() is paperboy.config.settings()
+
+
+def test_bad_smtp_port_gets_clear_error(env):
+    env.setenv("SMTP_PORT", "465x")
+    import pytest
+
+    with pytest.raises(RuntimeError, match="SMTP_PORT must be a number"):
+        Settings()

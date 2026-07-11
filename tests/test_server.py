@@ -62,6 +62,19 @@ def test_search_papers_arxiv_source(env, monkeypatch, paper_factory):
     assert results[0]["open_access_pdf"] is False
 
 
+def test_search_max_results_floor_and_cap(env, monkeypatch):
+    seen = []
+
+    def fake_search(q, max_results):
+        seen.append(max_results)
+        return []
+
+    monkeypatch.setattr(openalex, "search", fake_search)
+    server.search_papers("q", max_results=0)
+    server.search_papers("q", max_results=999)
+    assert seen == [1, 25]
+
+
 def test_search_wraps_backend_errors_actionably(env, monkeypatch):
     def boom(q, max_results):
         raise httpx.ConnectError("no route to host")
@@ -430,11 +443,35 @@ def test_list_queue_tool(env, monkeypatch):
 
 def test_remove_from_queue_tool(env, monkeypatch):
     monkeypatch.setattr(
-        zotero_client, "remove_by_refs", lambda refs: (["Paper A"], ["nope"])
+        zotero_client,
+        "remove_by_refs",
+        lambda refs: ([{"title": "Paper A", "was_sent": False}], ["nope"]),
     )
     receipt = server.remove_from_queue(["10.1/a", "nope"])
     assert "Removed 1 item(s)" in receipt and "Paper A" in receipt
     assert "Not found in queue: nope" in receipt
+    assert "re-deliver" not in receipt
+
+
+def test_remove_from_queue_warns_on_sent_items(env, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "remove_by_refs",
+        lambda refs: ([{"title": "Read One", "was_sent": True}], []),
+    )
+    receipt = server.remove_from_queue(["10.1/a"])
+    assert "sent-state is erased" in receipt
+    assert "WILL re-deliver: Read One" in receipt
+
+
+def test_setup_status_flags_invalid_delivery_method(env):
+    env.setenv("DELIVERY_METHOD", "carrier-pigeon")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    status = server.setup_status()
+    assert status["delivery_ready"] is False
+    assert any("carrier-pigeon" in step for step in status["next_steps"])
 
 
 # --- send_queue ------------------------------------------------------------

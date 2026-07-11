@@ -181,12 +181,12 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
     ).endswith(f"/abs/{arxiv_id}")
 
 
-def remove_by_refs(refs: list[str]) -> tuple[list[str], list[str]]:
+def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
     """Delete queue items matching each ref (id, DOI, URL, or title).
 
     Matching is exact (normalized ids/DOIs, case-insensitive titles);
-    partial or empty refs never match. Returns (removed titles, refs
-    that matched nothing).
+    partial or empty refs never match. Returns (removed entries with
+    ``title`` and ``was_sent``, refs that matched nothing).
     """
     api = _api()
     items = _queue_items()
@@ -201,7 +201,12 @@ def remove_by_refs(refs: list[str]) -> tuple[list[str], list[str]]:
             continue
         api.delete_item(match)
         items.remove(match)
-        removed.append(match["data"].get("title", match["key"]))
+        removed.append(
+            {
+                "title": match["data"].get("title", match["key"]),
+                "was_sent": is_sent(match),
+            }
+        )
     return removed, misses
 
 

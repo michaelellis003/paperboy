@@ -49,12 +49,46 @@ def test_title_hit_on_arxiv_is_canonicalized(monkeypatch, paper_factory):
 def test_title_with_weak_match_rejected(monkeypatch, paper_factory):
     hit = paper_factory(title="Something Entirely Different")
     monkeypatch.setattr(openalex, "search", lambda q, max_results: [hit])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
     with pytest.raises(ValueError, match="confidently-matching title"):
         resolver.resolve("attention is all you need")
 
 
+def test_title_scans_beyond_top_hit(monkeypatch, paper_factory):
+    # relevance ranking may put a derivative work first (Sentence-BERT
+    # above BERT); the true match deeper in the list must win
+    derivative = paper_factory(
+        title="Sentence-BERT: Sentence Embeddings using Siamese Networks",
+        arxiv_id=None,
+        doi="10.1/sbert",
+    )
+    canonical = paper_factory(
+        title="BERT: Pre-training of Deep Bidirectional Transformers "
+        "for Language Understanding",
+        arxiv_id=None,
+        doi="10.1/bert",
+    )
+    monkeypatch.setattr(
+        openalex, "search", lambda q, max_results: [derivative, canonical]
+    )
+    resolved = resolver.resolve(
+        "BERT: Pre-training of Deep Bidirectional Transformers for "
+        "Language Understanding"
+    )
+    assert resolved is canonical
+
+
+def test_title_falls_back_to_arxiv_search(monkeypatch, paper_factory):
+    wanted = paper_factory(title="A Very Specific Preprint Title")
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [wanted])
+    monkeypatch.setattr(arxiv, "get_paper", lambda ref: wanted)
+    assert resolver.resolve("A Very Specific Preprint Title") is wanted
+
+
 def test_unresolvable_ref_raises(monkeypatch):
     monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
     with pytest.raises(ValueError, match="arXiv id, DOI, or"):
         resolver.resolve("my cool paper")
 
@@ -131,6 +165,7 @@ def test_download_all_candidates_non_pdf_raises(monkeypatch, paper_factory):
 
 def test_publisher_url_error_includes_hint(monkeypatch):
     monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
     with pytest.raises(ValueError, match="publisher landing URLs"):
         resolver.resolve("https://www.nature.com/articles/s41586-x")
 

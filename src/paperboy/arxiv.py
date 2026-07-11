@@ -71,10 +71,13 @@ def get_paper(id_or_url: str) -> Paper:
 
 def search(query: str, max_results: int = 5) -> list[Paper]:
     """Search arXiv by relevance and return up to ``max_results`` papers."""
+    # Colons/quotes are arXiv query syntax (field prefixes, phrases);
+    # inside a title like "BERT: Pre-training..." they break parsing.
+    cleaned = re.sub(r'[:"?*()]', " ", query).strip()
     response = client.get(
         _API,
         params={
-            "search_query": f"all:{query}",
+            "search_query": f"all:{cleaned}",
             "max_results": max_results,
             "sortBy": "relevance",
         },

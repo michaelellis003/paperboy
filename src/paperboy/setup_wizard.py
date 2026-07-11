@@ -156,9 +156,13 @@ def _setup_smtp(default_user: str) -> dict[str, str]:
     while True:
         values = {
             "SMTP_HOST": _ask("SMTP host", "smtp.gmail.com"),
-            "SMTP_PORT": _ask("SMTP port", "465"),
-            "SMTP_USER": _ask("SMTP username", default_user),
         }
+        port = _ask("SMTP port", "465")
+        while not port.isdigit():
+            print("The port must be a number (465 for SSL, 587 for TLS).")
+            port = _ask("SMTP port", "465")
+        values["SMTP_PORT"] = port
+        values["SMTP_USER"] = _ask("SMTP username", default_user)
         values["SMTP_PASSWORD"] = _ask_secret("SMTP password")
         print("Validating SMTP login...")
         error = validate_smtp(
@@ -320,7 +324,8 @@ def _run(argv: list[str] | None = None) -> None:
         print(f"connector as the bearer token):\n  {token}")
 
     update_env(values, path=args.env)
-    print(f"\nWrote {len(values)} value(s) to {args.env}. Next steps:")
+    env_path = os.path.abspath(args.env)
+    print(f"\nWrote {len(values)} value(s) to {env_path}. Next steps:")
     print("  - Local use:  claude mcp add paperboy -- \\")
     print("      uv run --directory <path-to-this-repo> paperboy")
     print("    (--directory matters: the server loads .env from there)")

@@ -16,6 +16,17 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def _int_env(name: str, default: str) -> int:
+    value = _env(name, default)
+    try:
+        return int(value)
+    except ValueError:
+        raise RuntimeError(
+            f"{name} must be a number, got {value!r} — fix it in .env "
+            "or re-run 'paperboy setup'."
+        ) from None
+
+
 def load_env_file(path: str | None = None) -> None:
     """Load .env into the environment; already-set variables win.
 
@@ -43,9 +54,7 @@ class Settings:
         default_factory=lambda: _env("DEVICE_EMAIL") or _env("KINDLE_EMAIL")
     )
     smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST"))
-    smtp_port: int = field(
-        default_factory=lambda: int(_env("SMTP_PORT", "465"))
-    )
+    smtp_port: int = field(default_factory=lambda: _int_env("SMTP_PORT", "465"))
     smtp_user: str = field(default_factory=lambda: _env("SMTP_USER"))
     smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD"))
     from_email: str = field(default_factory=lambda: _env("FROM_EMAIL"))
