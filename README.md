@@ -131,6 +131,30 @@ Then add it in claude.ai → Settings → Connectors → Add custom connector
 with the service URL + `/mcp`, supplying the token as the Authorization
 header (`Bearer <token>`).
 
+### How credentials flow
+
+The wizard runs once; everything else reads its output:
+
+```
+paperboy setup ──► .env (single source of truth, chmod 600)
+                    ├──► local server: re-read at every startup
+                    │    (spawned per session over stdio — not a daemon)
+                    └──► deploy.sh: copied into Secret Manager at
+                         deploy time; the Cloud Run instance never
+                         sees .env and runs independently afterward
+```
+
+Local and cloud instances can run simultaneously without conflict:
+the server is stateless, so all state (queue, sent-tags, collections)
+lives in Zotero and both instances share the same truth — a paper
+sent from your phone is "already sent" to your laptop session.
+
+The one gotcha: after editing `.env` (e.g. rotating a password), the
+local server picks it up next session automatically, but the cloud
+instance keeps its Secret Manager copy until you re-run
+`deploy/deploy.sh` — re-running syncs new secret versions and
+redeploys.
+
 ## Roadmap
 
 - [ ] reMarkable delivery backend (real cloud API)
