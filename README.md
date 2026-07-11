@@ -161,7 +161,4 @@ infrastructure. Recommendations via the
 [pyzotero](https://github.com/urschrei/pyzotero), and
 [httpx](https://github.com/encode/httpx).
 
-paperboy was built with [Claude Code](https://claude.com/claude-code):
-the tools were designed, tested, and refined by running Claude against
-the server and fixing what tripped it up. The commit history shows the
-process.
+paperboy was built with [Claude Code](https://claude.com/claude-code).
