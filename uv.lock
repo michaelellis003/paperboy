@@ -882,6 +882,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "httpx" },
+    { name = "python-dotenv" },
     { name = "pyzotero" },
 ]
 
@@ -898,6 +899,7 @@ dev = [
 requires-dist = [
     { name = "fastmcp", specifier = ">=3.0" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyzotero", specifier = ">=1.5" },
 ]
 

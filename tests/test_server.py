@@ -56,7 +56,9 @@ def test_search_papers_arxiv_source(env, monkeypatch, paper_factory):
         lambda q, max_results: [paper_factory(pdf_url=None, arxiv_id=None)],
     )
     results = server.search_papers("attention", source="arxiv")
-    assert results[0]["ref"] == "https://arxiv.org/abs/2401.12345"
+    # DOI-less, non-arXiv works fall back to the exact title, which
+    # round-trips through the resolver (a bare URL would not).
+    assert results[0]["ref"] == "A Test Paper"
     assert results[0]["open_access_pdf"] is False
 
 
@@ -97,6 +99,22 @@ def test_send_papers_all_paywalled(env, monkeypatch, paper_factory):
     receipt = server.send_papers(["10.1/x"])
     assert receipt.startswith("Nothing was sent")
     assert "no open-access PDF" in receipt
+
+
+def test_send_papers_all_paywalled_still_queues(
+    zotero_env, monkeypatch, paper_factory
+):
+    added, tagged = [], []
+    monkeypatch.setattr(
+        resolver, "resolve", lambda ref: paper_factory(pdf_url=None)
+    )
+    monkeypatch.setattr(
+        zotero_client, "add_paper", lambda p: (added.append(p), "K", True)[1:]
+    )
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
+    receipt = server.send_papers(["10.1/x"])
+    assert added and tagged == ["K"]
+    assert "queued unsent in Zotero Reading Queue" in receipt
 
 
 def test_send_papers_reports_unresolvable(
@@ -287,14 +305,21 @@ def test_partial_delivery_marks_only_sent_batch(
 # --- queue_papers ----------------------------------------------------------
 
 
-def test_queue_papers(env, monkeypatch, paper_factory):
+@pytest.fixture
+def zotero_ok(monkeypatch):
+    monkeypatch.setattr(zotero_client, "ensure_configured", lambda: None)
+
+
+def test_queue_papers(env, zotero_ok, monkeypatch, paper_factory):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
     receipt = server.queue_papers(["2401.12345"])
     assert "Queued 1 new paper(s) in 'Reading Queue'" in receipt
 
 
-def test_queue_papers_reports_existing(env, monkeypatch, paper_factory):
+def test_queue_papers_reports_existing(
+    env, zotero_ok, monkeypatch, paper_factory
+):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", False))
     receipt = server.queue_papers(["2401.12345"])
@@ -302,13 +327,22 @@ def test_queue_papers_reports_existing(env, monkeypatch, paper_factory):
     assert "already in queue: A Test Paper" in receipt
 
 
-def test_queue_papers_nothing_resolves(env, monkeypatch):
+def test_queue_papers_nothing_resolves(env, zotero_ok, monkeypatch):
     def fail(ref):
         raise ValueError("nope")
 
     monkeypatch.setattr(resolver, "resolve", fail)
     receipt = server.queue_papers(["gibberish"])
     assert receipt.startswith("Nothing was queued")
+
+
+def test_queue_papers_fails_fast_without_zotero(env, monkeypatch):
+    def explode(ref):
+        raise AssertionError("resolver must not be called")
+
+    monkeypatch.setattr(resolver, "resolve", explode)
+    with pytest.raises(RuntimeError, match="paperboy setup"):
+        server.queue_papers(["2401.12345"])
 
 
 # --- list / remove ---------------------------------------------------------

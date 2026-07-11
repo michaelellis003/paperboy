@@ -186,18 +186,47 @@ def test_list_queue_statuses(fake_api):
 
 def test_remove_by_refs(fake_api):
     fake_api.items = [
-        {"key": "A", "data": {"title": "Alpha", "DOI": "10.1/alpha"}},
+        {"key": "A", "data": {"title": "Alpha", "DOI": "10.1000/alpha"}},
         {
             "key": "B",
-            "data": {"title": "Beta", "url": "https://arxiv.org/abs/2401.1"},
+            "data": {
+                "title": "Beta",
+                "url": "https://arxiv.org/abs/2401.12345",
+            },
         },
     ]
     removed, misses = zotero_client.remove_by_refs(
-        ["10.1/alpha", "beta", "nonexistent"]
+        ["10.1000/alpha", "beta", "nonexistent"]
     )
     assert removed == ["Alpha", "Beta"]
     assert misses == ["nonexistent"]
     assert fake_api.deleted == ["A", "B"]
+
+
+def test_remove_by_refs_rejects_empty_and_partial(fake_api):
+    fake_api.items = [
+        {"key": "A", "data": {"title": "Alpha", "DOI": "10.1000/alpha"}},
+        {"key": "B", "data": {"title": "Beta", "DOI": "10.1000/beta"}},
+    ]
+    removed, misses = zotero_client.remove_by_refs(["", "  ", "10.1000"])
+    assert removed == []
+    assert misses == ["", "  ", "10.1000"]
+    assert fake_api.deleted == []
+
+
+def test_remove_by_refs_matches_archive_id(fake_api):
+    fake_api.items = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Alpha",
+                "url": "https://doi.org/10.65215/junk",
+                "archiveID": "arXiv:2401.12345",
+            },
+        }
+    ]
+    removed, misses = zotero_client.remove_by_refs(["arXiv:2401.12345"])
+    assert removed == ["Alpha"] and misses == []
 
 
 def test_creates_missing_collection(fake_api, paper_factory):

@@ -18,9 +18,7 @@ from .net import client
 
 _ZOTERO_KEYS_URL = "https://www.zotero.org/settings/keys/new"
 _ZOTERO_CURRENT_KEY = "https://api.zotero.org/keys/current"
-_AMAZON_DEVICES_URL = (
-    "https://www.amazon.com/hz/mycd/digital-console/alldevices"
-)
+_AMAZON_PREFS_URL = "https://www.amazon.com/hz/mycd/digital-console/preferences"
 _GMAIL_APP_PASSWORDS = "https://myaccount.google.com/apppasswords"
 _DROPBOX_APPS_URL = "https://www.dropbox.com/developers/apps/create"
 _DROPBOX_TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
@@ -173,10 +171,11 @@ def _setup_smtp(default_user: str) -> dict[str, str]:
 
 
 def _setup_kindle() -> dict[str, str]:
-    print("\n[Kindle] Two things from Amazon's Personal Document Settings:")
+    print("\n[Kindle] Two things from Amazon's Preferences page")
+    print("(scroll to 'Personal Document Settings'):")
     print("  1. Your Send-to-Kindle address (…@kindle.com)")
     print("  2. Add your sending email to the Approved E-mail List")
-    _offer_browser(_AMAZON_DEVICES_URL)
+    _offer_browser(_AMAZON_PREFS_URL)
     device = _ask("Send-to-Kindle address")
     sender = _ask("Your sending email (must be on the approved list)")
     values = {
@@ -301,7 +300,9 @@ def run(argv: list[str] | None = None) -> None:
 
     update_env(values, path=args.env)
     print(f"\nWrote {len(values)} value(s) to {args.env}. Next steps:")
-    print("  - Local use:  claude mcp add paperboy -- uv run paperboy")
+    print("  - Local use:  claude mcp add paperboy -- \\")
+    print("      uv run --directory <path-to-this-repo> paperboy")
+    print("    (--directory matters: the server loads .env from there)")
     print("  - Try it:     ask Claude to send a paper to your device")
     if "MCP_AUTH_TOKEN" in values:
         print("  - Remote use: deploy (see README) and add a claude.ai")

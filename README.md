@@ -38,14 +38,16 @@ reMarkable (real cloud API) is on the roadmap.
 | `search_papers` | Search OpenAlex (general) or arXiv (`source="arxiv"`); results carry a `ref` and an `open_access_pdf` flag |
 | `send_papers` | One-off send by arXiv id, DOI, URL, or title (also records in Zotero if configured) |
 | `queue_papers` | Add papers to the Zotero Reading Queue without sending |
-| `send_queue` | Send every unsent queue item, then tag as sent |
+| `list_queue` | Show the queue with per-item status (unsent / sent / no-open-access-pdf) |
+| `remove_from_queue` | Delete queue items by exact ref or title |
+| `send_queue` | Send every unsent queue item (auto-split under email limits), then tag as sent |
 | `setup_status` | Report what's configured / what's missing (no secrets) so Claude can guide setup |
 
 ## Development
 
 Managed with [uv](https://docs.astral.sh/uv/); linted/formatted with ruff
 (Google style), type-checked with [ty](https://docs.astral.sh/ty/), tested
-with pytest (coverage gate: 80%, currently ~98%).
+with pytest behind an enforced 80% coverage gate.
 
 ```bash
 uv sync                    # install runtime + dev dependencies
@@ -81,6 +83,9 @@ documented there. Then register with Claude Code:
 ```bash
 claude mcp add paperboy -- uv run --directory /path/to/paperboy paperboy
 ```
+
+`--directory` matters: the server loads `.env` from its working
+directory (set `PAPERBOY_ENV=/path/to/.env` to point elsewhere).
 
 If paperboy is added but half-configured, ask Claude "check my paperboy
 setup" — the `setup_status` tool reports what's missing and what to do,

@@ -11,20 +11,27 @@ from typing import Any
 
 from pyzotero import zotero
 
+from . import arxiv, doi
 from .config import settings
 from .models import Paper
 
 NO_PDF_TAG = "no-oa-pdf"
 
 
+def ensure_configured() -> None:
+    """Raise an actionable error when Zotero credentials are missing."""
+    if not settings().zotero_enabled:
+        raise RuntimeError(
+            "Zotero is not configured — the reading queue requires it. "
+            "Ask the user to run 'paperboy setup' in a terminal "
+            "(setup_status shows what is missing)."
+        )
+
+
 @lru_cache(maxsize=1)
 def _api() -> zotero.Zotero:
+    ensure_configured()
     cfg = settings()
-    if not cfg.zotero_enabled:
-        raise RuntimeError(
-            "Zotero is not configured. "
-            "Set ZOTERO_API_KEY and ZOTERO_LIBRARY_ID."
-        )
     return zotero.Zotero(
         cfg.zotero_library_id, cfg.zotero_library_type, cfg.zotero_api_key
     )
@@ -145,24 +152,41 @@ def list_queue() -> list[dict]:
     return entries
 
 
+def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
+    """Exact-only matching — deletion must never hit the wrong paper."""
+    needle = ref.strip()
+    if not needle:
+        return False
+    lowered = needle.lower()
+    if lowered == data.get("title", "").lower():
+        return True
+    if lowered == data.get("url", "").lower():
+        return True
+    found_doi = doi.extract_doi(needle)
+    if found_doi and found_doi.lower() == data.get("DOI", "").lower():
+        return True
+    try:
+        arxiv_id = arxiv.normalize_id(needle)
+    except ValueError:
+        return False
+    return data.get("archiveID", "") == f"arXiv:{arxiv_id}" or data.get(
+        "url", ""
+    ).endswith(f"/abs/{arxiv_id}")
+
+
 def remove_by_refs(refs: list[str]) -> tuple[list[str], list[str]]:
     """Delete queue items matching each ref (id, DOI, URL, or title).
 
-    Returns (removed titles, refs that matched nothing).
+    Matching is exact (normalized ids/DOIs, case-insensitive titles);
+    partial or empty refs never match. Returns (removed titles, refs
+    that matched nothing).
     """
     api = _api()
     items = _queue_items()
     removed, misses = [], []
     for ref in refs:
-        needle = ref.strip().lower()
         match = next(
-            (
-                item
-                for item in items
-                if needle in item["data"].get("DOI", "").lower()
-                or needle in item["data"].get("url", "").lower()
-                or needle == item["data"].get("title", "").lower()
-            ),
+            (item for item in items if _ref_matches(ref, item["data"])),
             None,
         )
         if match is None:

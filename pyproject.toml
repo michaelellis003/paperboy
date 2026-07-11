@@ -10,6 +10,7 @@ dependencies = [
     "fastmcp>=3.0",
     "pyzotero>=1.5",
     "httpx>=0.27",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]

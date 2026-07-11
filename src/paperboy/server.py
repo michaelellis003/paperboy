@@ -36,7 +36,9 @@ def _summary(paper: Paper) -> dict:
     if len(paper.authors) > 3:
         authors = [*authors, "et al."]
     return {
-        "ref": paper.doi or paper.arxiv_id or paper.url,
+        # Falls back to the exact title, which the resolver accepts —
+        # a bare landing URL would not round-trip into send_papers.
+        "ref": paper.doi or paper.arxiv_id or paper.title,
         "title": paper.title,
         "authors": authors,
         "published": paper.published,
@@ -54,10 +56,11 @@ def search_papers(
     ``source`` is 'all' (OpenAlex: journals, conferences, and preprint
     servers including arXiv — usually the better ranking, even for
     arXiv-native topics) or 'arxiv' (arXiv's own search; only better
-    for very recent preprints). Each result has a ``ref`` (DOI or arXiv
-    id) to pass to send_papers / queue_papers. ``open_access_pdf``
-    means an OA PDF link was found; delivery can still fail if the
-    link is dead (arXiv-hosted papers are the most reliable).
+    for very recent preprints). Each result has a ``ref`` (DOI, arXiv
+    id, or exact title) to pass to send_papers / queue_papers.
+    ``open_access_pdf`` means an OA PDF link was found; delivery can
+    still fail if the link is dead (arXiv-hosted papers are the most
+    reliable).
     """
     if source == "arxiv":
         papers = arxiv.search(query, max_results=max_results)
@@ -211,11 +214,23 @@ def send_papers(
     problems.extend(failures)
 
     if not downloaded:
+        queued_note = ""
+        if settings().zotero_enabled and resolved:
+            for paper in resolved:
+                item_key, _ = zotero_client.add_paper(paper)
+                if not paper.pdf_url:
+                    zotero_client.mark_no_pdf(item_key)
+            queued_note = " (queued unsent in Zotero Reading Queue)"
         skips = [f"no open-access PDF: {p.title}" for p in no_pdf] + [
             f"already sent (use force=True to resend): {p.title}"
             for p in already_sent
         ]
-        return "Nothing was sent. " + "; ".join(skips + problems)
+        return (
+            "Nothing was sent."
+            + queued_note
+            + " "
+            + "; ".join(skips + problems)
+        )
 
     documents = [
         (paper.safe_filename, content) for paper, content in downloaded
@@ -254,6 +269,7 @@ def queue_papers(papers: list[str]) -> str:
     the queue are reported as such, not re-added. Unresolvable papers
     are reported back — relay those to the user.
     """
+    zotero_client.ensure_configured()
     resolved, problems = _resolve_all(papers)
     new, existing = [], []
     for paper in resolved:
@@ -436,6 +452,9 @@ def main() -> None:
 
         setup_wizard.run(sys.argv[2:])
         return
+    from .config import load_env_file
+
+    load_env_file()
     port = os.environ.get("PORT")
     if port:
         mcp.auth = _bearer_auth()

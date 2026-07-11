@@ -1,5 +1,24 @@
+import os
+
 import paperboy.config
 from paperboy.config import Settings
+
+
+def test_load_env_file_fills_missing_vars(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        'DEVICE_EMAIL=file@kindle.com\nSMTP_HOST="from file"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEVICE_EMAIL", raising=False)
+    monkeypatch.setenv("SMTP_HOST", "already-set")
+    paperboy.config.load_env_file()
+    assert os.environ["DEVICE_EMAIL"] == "file@kindle.com"
+    assert os.environ["SMTP_HOST"] == "already-set"
+
+
+def test_load_env_file_missing_file_is_noop(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    paperboy.config.load_env_file()
 
 
 def test_kindle_email_alias(env):

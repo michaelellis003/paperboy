@@ -9,9 +9,22 @@ delivery backend validates what it needs when it is used.
 import os
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
+
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
+
+
+def load_env_file(path: str | None = None) -> None:
+    """Load .env into the environment; already-set variables win.
+
+    Called from the server entry point so that the file the setup
+    wizard writes actually takes effect. Defaults to ./.env (the cwd
+    that ``uv run --directory <project>`` sets); override the location
+    with PAPERBOY_ENV.
+    """
+    load_dotenv(path or os.environ.get("PAPERBOY_ENV", ".env"), override=False)
 
 
 @dataclass(frozen=True)
