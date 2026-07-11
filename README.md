@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/michaelellis003/paperboy/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelellis003/paperboy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![paperboy MCP server](https://glama.ai/mcp/servers/michaelellis003/paperboy/badges/score.svg)](https://glama.ai/mcp/servers/michaelellis003/paperboy)
 
 ![Claude finding three papers, filing them in Zotero, and sending two to a Kindle](assets/paperboy-demo.gif)
 
