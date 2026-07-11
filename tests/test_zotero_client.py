@@ -47,6 +47,11 @@ class FakeZotero:
     def addto_collection(self, key, item):
         item["data"].setdefault("collections", []).append(key)
 
+    def deletefrom_collection(self, key, item):
+        self.uncollected = getattr(self, "uncollected", [])
+        self.uncollected.append((key, item["key"]))
+        item["data"]["collections"].remove(key)
+
     def delete_item(self, item):
         self.deleted.append(item["key"])
         self.items = [i for i in self.items if i["key"] != item["key"]]
@@ -235,7 +240,39 @@ def test_remove_by_refs_reports_sent_state(env, fake_api):
         }
     ]
     removed, _ = zotero_client.remove_by_refs(["10.1000/read"])
-    assert removed == [{"title": "Already Read", "was_sent": True}]
+    assert removed == [
+        {
+            "title": "Already Read",
+            "was_sent": True,
+            "kept_in_library": False,
+        }
+    ]
+
+
+def test_remove_keeps_items_filed_elsewhere(env, fake_api):
+    fake_api.items = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Filed Paper",
+                "DOI": "10.1000/filed",
+                "collections": ["COLL", "TOPICAL"],
+                "tags": [{"tag": "sent-to-ereader"}],
+            },
+        }
+    ]
+    removed, _ = zotero_client.remove_by_refs(["10.1000/filed"])
+    assert removed == [
+        {"title": "Filed Paper", "was_sent": True, "kept_in_library": True}
+    ]
+    # dropped from the queue collection, NOT deleted from the library
+    assert fake_api.deleted == []
+    assert fake_api.uncollected == [("COLL", "A")]
+
+
+def test_collection_key_rejects_empty_name(fake_api):
+    with pytest.raises(ValueError, match="non-empty"):
+        zotero_client.collection_key("   ", create=True)
 
 
 def test_remove_by_refs_rejects_empty_and_partial(fake_api):

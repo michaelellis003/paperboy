@@ -497,6 +497,93 @@ def test_send_papers_files_into_collections(
     assert "filed under: ML" in receipt
 
 
+def test_remove_reports_kept_in_library(env, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "remove_by_refs",
+        lambda refs: (
+            [
+                {
+                    "title": "Filed One",
+                    "was_sent": True,
+                    "kept_in_library": True,
+                }
+            ],
+            [],
+        ),
+    )
+    receipt = server.remove_from_queue(["10.1/a"])
+    assert "kept in the library" in receipt
+    assert "sent-state preserved" in receipt
+    # kept items keep their sent tag, so no re-delivery warning
+    assert "WILL re-deliver" not in receipt
+
+
+def test_send_papers_files_already_sent_papers(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    filed = []
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client, "find_item", lambda p: {"key": "K", "data": {}}
+    )
+    monkeypatch.setattr(zotero_client, "is_sent", lambda item: True)
+    monkeypatch.setattr(
+        zotero_client,
+        "file_item",
+        lambda item, collections: filed.append(collections),
+    )
+    receipt = server.send_papers(["2401.12345"], collections=["ML"])
+    assert sent_documents == []  # still not re-sent
+    assert filed == [["ML"]]  # but the filing happened
+    assert "filed into requested collections" in receipt
+
+
+def test_send_papers_dry_run_does_not_file(
+    zotero_env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client, "find_item", lambda p: {"key": "K", "data": {}}
+    )
+    monkeypatch.setattr(zotero_client, "is_sent", lambda item: True)
+
+    def explode(item, collections):
+        raise AssertionError("dry_run must not file")
+
+    monkeypatch.setattr(zotero_client, "file_item", explode)
+    server.send_papers(["2401.12345"], collections=["ML"], dry_run=True)
+
+
+def test_collections_ignored_note_without_zotero(
+    env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    receipt = server.send_papers(["2401.12345"], collections=["ML"])
+    assert "collections ignored (Zotero is not configured)" in receipt
+
+
+def test_empty_collection_names_are_dropped(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    seen = {}
+
+    def fake_add(paper, collections=None):
+        seen["collections"] = collections
+        return "KEY", True
+
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(zotero_client, "add_paper", fake_add)
+    receipt = server.queue_papers(["2401.12345"], collections=["", "  "])
+    assert seen["collections"] is None
+    assert "ignored empty collection name(s)" in receipt
+
+
+def test_file_papers_rejects_empty_name(env, zotero_ok):
+    receipt = server.file_papers(["10.1/a"], "   ")
+    assert "must be non-empty" in receipt
+
+
 def test_list_queue_tool(env, monkeypatch):
     entries = [{"title": "T", "ref": "10.1/x", "status": "unsent", "added": ""}]
     monkeypatch.setattr(zotero_client, "list_queue", lambda: entries)
@@ -507,7 +594,16 @@ def test_remove_from_queue_tool(env, monkeypatch):
     monkeypatch.setattr(
         zotero_client,
         "remove_by_refs",
-        lambda refs: ([{"title": "Paper A", "was_sent": False}], ["nope"]),
+        lambda refs: (
+            [
+                {
+                    "title": "Paper A",
+                    "was_sent": False,
+                    "kept_in_library": False,
+                }
+            ],
+            ["nope"],
+        ),
     )
     receipt = server.remove_from_queue(["10.1/a", "nope"])
     assert "Removed 1 item(s)" in receipt and "Paper A" in receipt
@@ -519,7 +615,16 @@ def test_remove_from_queue_warns_on_sent_items(env, monkeypatch):
     monkeypatch.setattr(
         zotero_client,
         "remove_by_refs",
-        lambda refs: ([{"title": "Read One", "was_sent": True}], []),
+        lambda refs: (
+            [
+                {
+                    "title": "Read One",
+                    "was_sent": True,
+                    "kept_in_library": False,
+                }
+            ],
+            [],
+        ),
     )
     receipt = server.remove_from_queue(["10.1/a"])
     assert "sent-state is erased" in receipt

@@ -83,6 +83,28 @@ def search_papers(
     return [_summary(paper) for paper in papers]
 
 
+def _clean_collections(
+    collections: list[str] | None,
+) -> tuple[list[str] | None, str]:
+    """Drop empty collection names; report when any were dropped."""
+    if not collections:
+        return None, ""
+    cleaned = [name.strip() for name in collections if name.strip()]
+    note = (
+        " | ignored empty collection name(s)"
+        if len(cleaned) < len(collections)
+        else ""
+    )
+    return (cleaned or None), note
+
+
+def _collections_ignored_note(collections: list[str] | None) -> str:
+    """Flag collections requested while Zotero is unconfigured."""
+    if collections and not settings().zotero_enabled:
+        return " | collections ignored (Zotero is not configured)"
+    return ""
+
+
 def _oa_hint() -> str:
     """Warn when open-access lookup is disabled by missing config."""
     if settings().polite_email:
@@ -230,15 +252,18 @@ def send_papers(
     duplicate protection — re-sending the same ref ships another copy.
     Relay the full receipt — sizes, skips, and failures — to the user.
     """
+    collections, collection_note = _clean_collections(collections)
     resolved, problems = _resolve_all(papers)
 
     already_sent: list[Paper] = []
+    already_sent_items: list[dict] = []
     if settings().zotero_enabled and not force:
         remaining = []
         for paper in resolved:
             item = zotero_client.find_item(paper)
             if item is not None and zotero_client.is_sent(item):
                 already_sent.append(paper)
+                already_sent_items.append(item)
             else:
                 remaining.append(paper)
         resolved = remaining
@@ -276,6 +301,13 @@ def send_papers(
         parts.extend(problems)
         return " | ".join(parts)
 
+    # Filing is independent of delivery: papers skipped as already
+    # sent still get filed into the requested collections. (Not in
+    # dry_run — previews must not mutate.)
+    if settings().zotero_enabled and collections:
+        for item in already_sent_items:
+            zotero_client.file_item(item, collections)
+
     downloaded, failures = _download_all(sendable)
     problems.extend(failures)
 
@@ -288,9 +320,14 @@ def send_papers(
                 )
                 if not paper.pdf_url:
                     zotero_client.mark_no_pdf(item_key)
-            queued_note = " (queued unsent in Zotero Reading Queue)"
+            queued_note = " (queued unsent in Zotero Reading Queue"
+            if collections:
+                queued_note += f", filed under: {'; '.join(collections)}"
+            queued_note += ")"
         skips = [f"no open-access PDF: {p.title}" for p in no_pdf] + [
-            f"already sent (use force=True to resend): {p.title}"
+            "already sent (use force=True to resend"
+            + (", filed into requested collections" if collections else "")
+            + f"): {p.title}"
             for p in already_sent
         ]
         return (
@@ -299,6 +336,8 @@ def send_papers(
             + " "
             + "; ".join(skips + problems)
             + (_oa_hint() if no_pdf else "")
+            + collection_note
+            + _collections_ignored_note(collections)
         )
 
     documents = [
@@ -328,10 +367,13 @@ def send_papers(
         receipt += f" | {note}: {titles}{_oa_hint()}"
     if already_sent:
         titles = "; ".join(paper.title for paper in already_sent)
-        receipt += f" | Already sent, skipped (force=True to resend): {titles}"
+        extra = ", filed into requested collections" if collections else ""
+        receipt += (
+            f" | Already sent, skipped (force=True to resend{extra}): {titles}"
+        )
     if problems:
         receipt += f" | Problems: {'; '.join(problems)}"
-    return receipt
+    return receipt + collection_note + _collections_ignored_note(collections)
 
 
 @mcp.tool
@@ -348,6 +390,7 @@ def queue_papers(
     back — relay those to the user.
     """
     zotero_client.ensure_configured()
+    collections, collection_note = _clean_collections(collections)
     resolved, problems = _resolve_all(papers)
     new, existing, no_pdf = [], [], []
     for paper in resolved:
@@ -376,7 +419,7 @@ def queue_papers(
         )
     if problems:
         parts.append("; ".join(problems))
-    return " | ".join(parts)
+    return " | ".join(parts) + collection_note
 
 
 @mcp.tool
@@ -402,6 +445,8 @@ def file_papers(refs: list[str], collection: str) -> str:
     remove_from_queue: exact arXiv id, DOI, URL, or title.
     """
     zotero_client.ensure_configured()
+    if not collection.strip():
+        return "Nothing filed: the collection name must be non-empty."
     filed, misses = zotero_client.file_by_refs(refs, collection)
     receipt = f"Filed {len(filed)} item(s) under '{collection}'"
     if filed:
@@ -427,15 +472,27 @@ def remove_from_queue(refs: list[str]) -> str:
     """Remove papers from the Zotero Reading Queue by ref or title.
 
     Matches each ref (arXiv id, DOI, URL, or exact title) against
-    queue items and deletes matches from the library. This does not
-    delete anything from the e-reader — but it DOES erase the item's
-    sent-state, so sending the same paper later will deliver it again.
+    queue items. Items filed into other collections keep their library
+    record (and sent-state) and only leave the queue; items that live
+    nowhere else are deleted from the library, which erases their
+    sent-state — sending those again later will deliver them again.
+    Nothing is ever deleted from the e-reader.
     """
     removed, misses = zotero_client.remove_by_refs(refs)
     receipt = f"Removed {len(removed)} item(s) from the queue"
     if removed:
         receipt += ": " + "; ".join(entry["title"] for entry in removed)
-    forgotten = [entry["title"] for entry in removed if entry["was_sent"]]
+    kept = [entry["title"] for entry in removed if entry["kept_in_library"]]
+    if kept:
+        receipt += (
+            " | kept in the library (still filed in other collections, "
+            f"sent-state preserved): {'; '.join(kept)}"
+        )
+    forgotten = [
+        entry["title"]
+        for entry in removed
+        if entry["was_sent"] and not entry["kept_in_library"]
+    ]
     if forgotten:
         receipt += (
             " | note: their sent-state is erased — sending these again "

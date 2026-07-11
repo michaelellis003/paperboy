@@ -46,14 +46,22 @@ def collection_key(name: str, create: bool = False) -> str | None:
     """Find a collection key by name (case-insensitive).
 
     With ``create=True`` a missing collection is created (top-level).
+    Raises ValueError for empty names — Zotero rejects them, and a
+    silently created nameless collection is worse.
     """
     wanted = name.strip()
+    if not wanted:
+        raise ValueError("Collection name must be non-empty.")
     for collection in _collections_raw():
         if collection["data"]["name"].lower() == wanted.lower():
             return collection["key"]
     if not create:
         return None
     result = _api().create_collections([{"name": wanted}])
+    if result.get("failed"):
+        raise RuntimeError(
+            f"Zotero rejected collection {wanted!r}: {result['failed']}"
+        )
     return result["successful"]["0"]["key"]
 
 
@@ -121,6 +129,14 @@ def is_sent(item: dict) -> bool:
 def _add_to_collection(item: dict, key: str) -> None:
     if key not in item["data"].get("collections", []):
         _api().addto_collection(key, item)
+
+
+def file_item(item: dict, collections: list[str] | None) -> None:
+    """File an existing item into named collections (created on demand)."""
+    for name in collections or []:
+        key = collection_key(name, create=True)
+        if key:
+            _add_to_collection(item, key)
 
 
 def add_paper(
@@ -260,6 +276,7 @@ def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
     ``title`` and ``was_sent``, refs that matched nothing).
     """
     api = _api()
+    queue_key = _queue_collection_key()
     items = _queue_items()
     removed, misses = [], []
     for ref in refs:
@@ -270,12 +287,24 @@ def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
         if match is None:
             misses.append(ref)
             continue
-        api.delete_item(match)
+        # An item the user filed into topical collections is theirs to
+        # keep: only drop its queue membership. Items that live nowhere
+        # else are deleted outright.
+        other = [
+            key
+            for key in match["data"].get("collections", [])
+            if key != queue_key
+        ]
+        if other:
+            api.deletefrom_collection(queue_key, match)
+        else:
+            api.delete_item(match)
         items.remove(match)
         removed.append(
             {
                 "title": match["data"].get("title", match["key"]),
                 "was_sent": is_sent(match),
+                "kept_in_library": bool(other),
             }
         )
     return removed, misses
