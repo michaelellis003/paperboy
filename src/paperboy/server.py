@@ -6,6 +6,7 @@ sets PORT, which switches on the HTTP transport automatically.
 """
 
 import os
+import sys
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -133,6 +134,57 @@ def queue_papers(papers: list[str]) -> str:
 
 
 @mcp.tool
+def setup_status() -> dict:
+    """Report which paperboy features are configured and what's missing.
+
+    Returns configuration state only — never secret values. Use this to
+    guide the user through finishing setup. Credentials themselves must
+    be entered by running 'paperboy setup' in a terminal, never pasted
+    into the chat.
+    """
+    cfg = settings()
+    email_ready = all(
+        [
+            cfg.device_email,
+            cfg.smtp_host,
+            cfg.smtp_user,
+            cfg.smtp_password,
+            cfg.from_email,
+        ]
+    )
+    dropbox_ready = all(
+        [
+            cfg.dropbox_app_key,
+            cfg.dropbox_app_secret,
+            cfg.dropbox_refresh_token,
+        ]
+    )
+    delivery_ready = (
+        email_ready if cfg.delivery_method == "email" else dropbox_ready
+    )
+    next_steps = []
+    if not delivery_ready:
+        next_steps.append(
+            "Delivery is not configured — run 'paperboy setup' in a "
+            "terminal; it asks which e-reader you have and walks "
+            "through only the credentials that device needs."
+        )
+    if not cfg.zotero_enabled:
+        next_steps.append(
+            "Optional: connect Zotero for the reading queue — "
+            "'paperboy setup' covers it, or see README."
+        )
+    return {
+        "delivery_method": cfg.delivery_method,
+        "delivery_ready": delivery_ready,
+        "email_backend_configured": email_ready,
+        "dropbox_backend_configured": dropbox_ready,
+        "zotero_configured": cfg.zotero_enabled,
+        "next_steps": next_steps,
+    }
+
+
+@mcp.tool
 def send_queue() -> str:
     """Send every unsent paper in the Zotero Reading Queue to the e-reader.
 
@@ -196,7 +248,16 @@ def _bearer_auth() -> StaticTokenVerifier:
 
 
 def main() -> None:
-    """Run over stdio, or Streamable HTTP when PORT is set (Cloud Run)."""
+    """Run the server, or the setup wizard for ``paperboy setup``.
+
+    Serves over stdio by default, or Streamable HTTP when PORT is set
+    (Cloud Run does this).
+    """
+    if len(sys.argv) > 1 and sys.argv[1] == "setup":
+        from . import setup_wizard
+
+        setup_wizard.run(sys.argv[2:])
+        return
     port = os.environ.get("PORT")
     if port:
         mcp.auth = _bearer_auth()

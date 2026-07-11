@@ -176,6 +176,27 @@ def test_send_queue_nothing_deliverable(env, monkeypatch):
     assert receipt.startswith("Nothing in the queue is deliverable")
 
 
+def test_setup_status_unconfigured(monkeypatch):
+    import paperboy.config
+
+    for var in list(__import__("os").environ):
+        if var.startswith(("SMTP", "DEVICE", "KINDLE", "ZOTERO", "DROPBOX")):
+            monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(paperboy.config, "_settings", None)
+    status = server.setup_status()
+    assert status["delivery_ready"] is False
+    assert status["zotero_configured"] is False
+    assert any("paperboy setup" in step for step in status["next_steps"])
+
+
+def test_setup_status_email_ready(env):
+    status = server.setup_status()
+    assert status["delivery_method"] == "email"
+    assert status["delivery_ready"] is True
+    assert status["email_backend_configured"] is True
+    assert status["dropbox_backend_configured"] is False
+
+
 def test_bearer_auth_requires_token(monkeypatch):
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     with pytest.raises(SystemExit, match="MCP_AUTH_TOKEN"):

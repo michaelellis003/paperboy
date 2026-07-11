@@ -39,6 +39,7 @@ reMarkable (real cloud API) is on the roadmap.
 | `send_papers` | One-off send by arXiv id, DOI, URL, or title (also records in Zotero if configured) |
 | `queue_papers` | Add papers to the Zotero Reading Queue without sending |
 | `send_queue` | Send every unsent queue item, then tag as sent |
+| `setup_status` | Report what's configured / what's missing (no secrets) so Claude can guide setup |
 
 ## Development
 
@@ -53,19 +54,37 @@ uv run pytest              # tests with coverage
 uv run ruff check src tests && uv run ty check
 ```
 
-## Local setup
+## Setup
+
+Run the interactive wizard — it asks which e-reader you have and walks
+through only the credentials that device needs, validating each one as
+you enter it (SMTP login test, Zotero key check with automatic library
+ID lookup, full Dropbox OAuth exchange):
 
 ```bash
-cp .env.example .env   # fill in SMTP creds + device address
-set -a; source .env; set +a
-uv run paperboy        # stdio transport
+uv sync && uv run paperboy setup
 ```
 
-Register with Claude Code:
+How much setup depends entirely on the device:
+
+| You have | Credentials needed |
+|---|---|
+| Kindle | 2 — Send-to-Kindle address + an SMTP app password |
+| PocketBook | 2 — Send-to-PocketBook address + an SMTP app password |
+| Kobo | a Dropbox app (key/secret + one OAuth approval) |
+| + Zotero queue (optional) | 1 — a Zotero API key (library ID auto-detected) |
+| + claude.ai / mobile (optional) | auto-generated token + a cloud deploy |
+
+Prefer manual? `cp .env.example .env` and fill it in; every variable is
+documented there. Then register with Claude Code:
 
 ```bash
 claude mcp add paperboy -- uv run --directory /path/to/paperboy paperboy
 ```
+
+If paperboy is added but half-configured, ask Claude "check my paperboy
+setup" — the `setup_status` tool reports what's missing and what to do,
+without ever passing secrets through the chat.
 
 ## Remote deployment (Cloud Run)
 
@@ -97,13 +116,33 @@ provider integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth`.
       with fuzzy title matching)
 - [ ] OAuth (instead of static bearer token) via FastMCP auth providers
 
-## Prior art
+## Prior art & acknowledgments
 
-- [stakats/zotero-to-kindle](https://github.com/stakats/zotero-to-kindle) —
-  the same tag-driven idea, circa 2011, pre-MCP
-- [wahiggins3/send-to-kindle-mcp](https://github.com/wahiggins3/send-to-kindle-mcp) —
-  markdown→EPUB→Kindle, no library awareness
-- [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp) —
-  multi-source paper search/download
-- The Zotero MCP ecosystem (e.g. 54yyyu/zotero-mcp) — mature library
-  management; paperboy deliberately does *not* compete with it
+paperboy contains no code from other projects — everything in `src/` is
+original — but it stands on ideas and services worth crediting:
+
+**Inspiration** (no code reused):
+
+- [stakats/zotero-to-kindle](https://github.com/stakats/zotero-to-kindle)
+  (no license file) — the tag-driven Zotero→Kindle idea, circa 2011,
+  pre-MCP, by one of Zotero's original directors
+- [wahiggins3/send-to-kindle-mcp](https://github.com/wahiggins3/send-to-kindle-mcp)
+  (MIT) — markdown→EPUB→Kindle, no library awareness
+- [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp)
+  (MIT) — multi-source paper search/download
+- [54yyyu/zotero-mcp](https://github.com/54yyyu/zotero-mcp) (MIT) —
+  mature Zotero library management, and the model for our `setup`
+  wizard; paperboy deliberately does *not* compete with it
+
+**Dependencies** (all permissive, MIT-compatible):
+[FastMCP](https://github.com/jlowin/fastmcp) (Apache-2.0),
+[pyzotero](https://github.com/urschrei/pyzotero) (Blue Oak 1.0.0),
+[httpx](https://github.com/encode/httpx) (BSD-3-Clause).
+
+**Data & APIs**: Thank you to [arXiv](https://arxiv.org) for use of its
+open access interoperability. Paper metadata and open-access links come
+from [OpenAlex](https://openalex.org) (CC0),
+[Crossref](https://www.crossref.org) (open metadata), and
+[Unpaywall](https://unpaywall.org) (CC0 data), all run as open
+scholarly infrastructure. Library management via the
+[Zotero](https://www.zotero.org) web API.
