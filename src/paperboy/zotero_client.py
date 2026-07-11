@@ -87,8 +87,14 @@ def _queue_collection_key() -> str:
 
 
 def _queue_items() -> list[dict]:
+    # Read-only lookup: an absent queue collection means an empty
+    # queue — creating it here would make read paths (list_queue,
+    # find_item during dry_run) mutate the library.
+    key = collection_key(settings().reading_queue_collection)
+    if key is None:
+        return []
     api = _api()
-    return api.everything(api.collection_items_top(_queue_collection_key()))
+    return api.everything(api.collection_items_top(key))
 
 
 def _tags(item: dict) -> set[str]:

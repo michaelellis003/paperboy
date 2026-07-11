@@ -23,6 +23,8 @@ class FakeZotero:
         return self.existing_collections
 
     def create_collections(self, payload):
+        self.created_collections = getattr(self, "created_collections", [])
+        self.created_collections.append(payload[0]["name"])
         return {"successful": {"0": {"key": "NEWCOLL"}}}
 
     def collection_items_top(self, key):
@@ -285,6 +287,14 @@ def test_remove_keeps_items_filed_elsewhere(env, fake_api):
 def test_collection_key_rejects_empty_name(fake_api):
     with pytest.raises(ValueError, match="non-empty"):
         zotero_client.collection_key("   ", create=True)
+
+
+def test_read_paths_never_create_the_queue_collection(fake_api, paper_factory):
+    fake_api.existing_collections = []  # brand-new library
+    assert zotero_client.find_item(paper_factory()) is None
+    assert zotero_client.list_queue() == []
+    assert zotero_client.unsent_queue_items() == []
+    assert getattr(fake_api, "created_collections", []) == []
 
 
 def test_find_item_searches_whole_library(fake_api, paper_factory):
