@@ -105,7 +105,7 @@ def recommend_papers(
     interests: list[str] | None = None,
     recent_only: bool = True,
     max_results: int = 8,
-) -> list[dict]:
+) -> dict:
     """Discover papers the user may want to read — old or new.
 
     Blends two signals: citation-graph recommendations (Semantic
@@ -115,9 +115,14 @@ def recommend_papers(
     pass 2-4 short phrases distilled from the current conversation.
     recent_only=True favors newly published work; False searches the
     all-time pool (computer science only, an upstream limit).
-    Papers already in the user's library are excluded. Results carry
-    refs for send_papers / queue_papers — present them to the user
-    and let them pick; don't send unasked.
+    Papers already in the user's library are excluded (the queue plus
+    the 100 most recently added items). max_results is capped at 20.
+
+    Returns {"picks": [...], "problems": [...]}: picks carry refs for
+    send_papers / queue_papers; problems reports any discovery arm
+    that failed or seed that didn't resolve — ALWAYS relay problems,
+    or a stated interest may silently go uncovered. Present picks and
+    let the user choose; don't send unasked.
     """
     max_results = max(1, min(max_results, 20))
     problems: list[str] = []
@@ -132,10 +137,18 @@ def recommend_papers(
                 seeds.append(f"DOI:{paper.doi}")
     elif settings().zotero_enabled:
         seeds = zotero_client.seed_ids(limit=10)
+        if not seeds and not interests:
+            raise RuntimeError(
+                "No discovery signal: the Reading Queue has no papers "
+                "with arXiv ids or DOIs to seed from — pass seed_refs "
+                "and/or interests."
+            )
     if not seeds and not interests:
+        prefix = "; ".join(problems) + " — " if problems else ""
         raise RuntimeError(
-            "No discovery signal: pass seed_refs and/or interests, or "
-            "configure Zotero so the library can seed recommendations."
+            f"No discovery signal: {prefix}pass resolvable seed_refs "
+            "and/or interests, or configure Zotero so the library can "
+            "seed recommendations."
         )
 
     graph_arm: list[Paper] = []
@@ -146,14 +159,16 @@ def recommend_papers(
             graph_arm = s2.recommend(seeds, pool=pool, limit=max_results * 2)
         except httpx.HTTPError as exc:
             problems.append(
-                f"recommendation backend unreachable "
-                f"({type(exc).__name__}) — keyword results only"
+                "citation-graph arm unreachable "
+                f"({type(exc).__name__}) — its picks are missing"
             )
-    for phrase in (interests or [])[:4]:
-        try:
-            keyword_arm.extend(openalex.search(phrase, max_results=5))
-        except httpx.HTTPError:
-            problems.append(f"keyword search failed for: {phrase}")
+    # Round-robin across interest phrases so that, with small
+    # max_results, later phrases aren't starved by the first.
+    per_phrase = [
+        _interest_results(phrase, problems) for phrase in (interests or [])[:4]
+    ]
+    for group in zip_longest(*per_phrase):
+        keyword_arm.extend(paper for paper in group if paper is not None)
 
     # Interleave the arms so citation-graph results never starve the
     # conversation-interest results (or vice versa) within max_results.
@@ -173,9 +188,21 @@ def recommend_papers(
         seen |= keys
         fresh.append(paper)
 
-    if not fresh and problems:
-        raise RuntimeError("No recommendations: " + "; ".join(problems))
-    return [_summary(paper) for paper in fresh[:max_results]]
+    return {
+        "picks": [_summary(paper) for paper in fresh[:max_results]],
+        "problems": problems,
+    }
+
+
+def _interest_results(phrase: str, problems: list[str]) -> list[Paper]:
+    try:
+        return openalex.search(phrase, max_results=5)
+    except httpx.HTTPError as exc:
+        problems.append(
+            f"keyword search failed for {phrase!r} "
+            f"({type(exc).__name__}) — that interest is uncovered"
+        )
+        return []
 
 
 def _clean_collections(

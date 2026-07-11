@@ -238,11 +238,21 @@ def file_by_refs(
 def seed_ids(limit: int = 10) -> list[str]:
     """S2-style seed ids (ArXiv:/DOI: prefixed) from the queue.
 
-    Newest items first — the library is the user's interest profile,
-    and recent additions weight recommendations toward current focus.
+    Explicitly sorted newest-added first — recent additions weight
+    recommendations toward the user's current focus. (The Web API's
+    default sort is dateModified desc, so relying on response order
+    or reversing it would seed from stale or tag-edit-perturbed
+    items.)
     """
+    key = collection_key(settings().reading_queue_collection)
+    if key is None:
+        return []
+    api = _api()
+    items = api.collection_items_top(
+        key, sort="dateAdded", direction="desc", limit=50
+    )
     ids: list[str] = []
-    for item in reversed(_queue_items()):
+    for item in items:
         data = item["data"]
         archive = data.get("archiveID", "")
         if archive.startswith("arXiv:"):
@@ -255,14 +265,18 @@ def seed_ids(limit: int = 10) -> list[str]:
 
 
 def known_identities() -> set[str]:
-    """Identity keys of everything in the queue.
+    """Identity keys of the user's library, for recommendation dedup.
 
-    Lowered DOIs, arXiv ids, and normalized titles — used to exclude
-    already-known papers from recommendations.
+    Lowered DOIs, arXiv ids, and normalized titles from the queue PLUS
+    the 100 most recently added library items — items archived out of
+    the queue into topical collections must not be re-recommended.
     """
+    api = _api()
+    items = list(_queue_items())
+    items += api.top(sort="dateAdded", direction="desc", limit=100)
     keys: set[str] = set()
-    for item in _queue_items():
-        data = item["data"]
+    for item in items:
+        data = item.get("data", {})
         if data.get("DOI"):
             keys.add(data["DOI"].lower())
         archive = data.get("archiveID", "")

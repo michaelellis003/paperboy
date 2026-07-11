@@ -119,10 +119,11 @@ def test_recommend_seeds_from_library(zotero_env, monkeypatch, paper_factory):
         return [paper_factory(title="Fresh Rec", arxiv_id="2606.1")]
 
     monkeypatch.setattr(server.s2, "recommend", fake_recommend)
-    results = server.recommend_papers()
+    result = server.recommend_papers()
     assert seen["seeds"] == ["ArXiv:2312.00752"]
     assert seen["pool"] == "recent"
-    assert results[0]["title"] == "Fresh Rec"
+    assert result["picks"][0]["title"] == "Fresh Rec"
+    assert result["problems"] == []
 
 
 def test_recommend_all_time_pool(zotero_env, monkeypatch, paper_factory):
@@ -153,8 +154,8 @@ def test_recommend_excludes_library_papers(
             paper_factory(title="New One", arxiv_id="2606.1", doi=None),
         ],
     )
-    results = server.recommend_papers()
-    assert [r["title"] for r in results] == ["New One"]
+    result = server.recommend_papers()
+    assert [r["title"] for r in result["picks"]] == ["New One"]
 
 
 def test_recommend_blends_interests(env, monkeypatch, paper_factory):
@@ -163,8 +164,8 @@ def test_recommend_blends_interests(env, monkeypatch, paper_factory):
         "search",
         lambda q, max_results: [paper_factory(title=f"About {q}")],
     )
-    results = server.recommend_papers(interests=["state space models"])
-    assert results[0]["title"] == "About state space models"
+    result = server.recommend_papers(interests=["state space models"])
+    assert result["picks"][0]["title"] == "About state space models"
 
 
 def test_recommend_interleaves_arms(zotero_env, monkeypatch, paper_factory):
@@ -185,9 +186,9 @@ def test_recommend_interleaves_arms(zotero_env, monkeypatch, paper_factory):
             paper_factory(title="Keyword Hit", arxiv_id=None, doi="10.1/kw")
         ],
     )
-    results = server.recommend_papers(interests=["topic"], max_results=2)
+    result = server.recommend_papers(interests=["topic"], max_results=2)
     # the keyword arm gets a fair slot instead of being pushed out
-    assert [r["title"] for r in results] == ["Graph 0", "Keyword Hit"]
+    assert [r["title"] for r in result["picks"]] == ["Graph 0", "Keyword Hit"]
 
 
 def test_recommend_explicit_seeds(env, monkeypatch, paper_factory):
@@ -209,8 +210,51 @@ def test_recommend_backend_down_reports(env, monkeypatch, paper_factory):
         raise httpx.ConnectError("down")
 
     monkeypatch.setattr(server.s2, "recommend", boom)
-    with pytest.raises(RuntimeError, match="recommendation backend"):
-        server.recommend_papers(seed_refs=["2401.12345"])
+    result = server.recommend_papers(seed_refs=["2401.12345"])
+    assert result["picks"] == []
+    assert any("citation-graph arm" in p for p in result["problems"])
+
+
+def test_recommend_surfaces_arm_failure_alongside_picks(
+    env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        server.s2,
+        "recommend",
+        lambda ids, pool, limit: [
+            paper_factory(title="Graph Pick", arxiv_id="2606.9", doi=None)
+        ],
+    )
+
+    def keyword_down(q, max_results):
+        raise httpx.ConnectError("429")
+
+    monkeypatch.setattr(openalex, "search", keyword_down)
+    result = server.recommend_papers(
+        seed_refs=["2401.12345"], interests=["coral reef ecology"]
+    )
+    # picks exist AND the failed interest is reported, never silent
+    assert result["picks"][0]["title"] == "Graph Pick"
+    assert any("coral reef ecology" in p for p in result["problems"])
+
+
+def test_recommend_unresolvable_seed_error_carries_diagnosis(env, monkeypatch):
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: (_ for _ in ()).throw(
+            ValueError(f"could not resolve: {ref}")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="could not resolve: zzqx"):
+        server.recommend_papers(seed_refs=["zzqx"])
+
+
+def test_recommend_empty_queue_message(zotero_env, monkeypatch):
+    monkeypatch.setattr(zotero_client, "seed_ids", lambda limit=10: [])
+    with pytest.raises(RuntimeError, match="Reading Queue has no papers"):
+        server.recommend_papers()
 
 
 # --- send_papers -----------------------------------------------------------

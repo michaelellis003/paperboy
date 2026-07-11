@@ -27,8 +27,18 @@ class FakeZotero:
         self.created_collections.append(payload[0]["name"])
         return {"successful": {"0": {"key": "NEWCOLL"}}}
 
-    def collection_items_top(self, key):
+    def collection_items_top(self, key, **kwargs):
+        # Emulate the Zotero Web API: insertion order is oldest-first,
+        # so sort=dateAdded desc returns newest-first.
+        if (
+            kwargs.get("sort") == "dateAdded"
+            and kwargs.get("direction") == "desc"
+        ):
+            return list(reversed(self.queue))
         return self.queue
+
+    def top(self, **kwargs):
+        return self.queue + self.library_items
 
     def item_template(self, item_type):
         return {"itemType": item_type}
