@@ -229,7 +229,9 @@ def _setup_dropbox(folder: str, full_access: bool) -> dict[str, str]:
                 "contact email; without one, non-arXiv papers cannot "
                 "be delivered."
             )
-            contact = _ask("Contact email (any address you own)")
+            contact = ""
+            while not contact:
+                contact = _ask("Contact email (any address you own)")
             return {
                 "DELIVERY_METHOD": "dropbox",
                 "DROPBOX_APP_KEY": app_key,
@@ -312,8 +314,10 @@ def _run(argv: list[str] | None = None) -> None:
         "\nWill you use paperboy remotely (claude.ai / mobile)?",
         default=False,
     ):
-        values["MCP_AUTH_TOKEN"] = secrets.token_urlsafe(32)
-        print("Generated MCP_AUTH_TOKEN (needed when deploying).")
+        token = secrets.token_urlsafe(32)
+        values["MCP_AUTH_TOKEN"] = token
+        print("Generated MCP_AUTH_TOKEN (paste into your claude.ai")
+        print(f"connector as the bearer token):\n  {token}")
 
     update_env(values, path=args.env)
     print(f"\nWrote {len(values)} value(s) to {args.env}. Next steps:")

@@ -62,6 +62,15 @@ def test_search_papers_arxiv_source(env, monkeypatch, paper_factory):
     assert results[0]["open_access_pdf"] is False
 
 
+def test_search_wraps_backend_errors_actionably(env, monkeypatch):
+    def boom(q, max_results):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(openalex, "search", boom)
+    with pytest.raises(RuntimeError, match="Search failed"):
+        server.search_papers("anything")
+
+
 def test_search_trims_long_author_lists(env, monkeypatch, paper_factory):
     paper = paper_factory(authors=[f"Author {i}" for i in range(9)])
     monkeypatch.setattr(openalex, "search", lambda q, max_results: [paper])
@@ -122,13 +131,45 @@ def test_send_papers_reports_unresolvable(
 ):
     def fake_resolve(ref):
         if ref == "gibberish":
-            raise ValueError("nope")
+            raise ValueError("could not resolve: gibberish")
         return paper_factory()
 
     monkeypatch.setattr(resolver, "resolve", fake_resolve)
     receipt = server.send_papers(["2401.12345", "gibberish"])
     assert len(sent_documents) == 1
     assert "could not resolve: gibberish" in receipt
+
+
+def test_send_papers_relays_resolver_hints(env, monkeypatch):
+    def fail(ref):
+        raise ValueError(
+            f"Could not resolve {ref!r} (publisher landing URLs are "
+            "not supported — try the DOI or exact title)"
+        )
+
+    monkeypatch.setattr(resolver, "resolve", fail)
+    receipt = server.send_papers(["https://nature.com/articles/x"])
+    assert "publisher landing URLs" in receipt
+
+
+def test_send_papers_4xx_is_not_labeled_transient(
+    env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    request = httpx.Request("GET", "https://api.openalex.org/works")
+
+    def fake_resolve(ref):
+        if ref == "Weird Title?":
+            raise httpx.HTTPStatusError(
+                "400",
+                request=request,
+                response=httpx.Response(400, request=request),
+            )
+        return paper_factory()
+
+    monkeypatch.setattr(resolver, "resolve", fake_resolve)
+    receipt = server.send_papers(["2401.12345", "Weird Title?"])
+    assert "backend rejected the request: HTTP 400" in receipt
+    assert "retry" not in receipt.split("HTTP 400")[1][:40]
 
 
 def test_send_papers_distinguishes_network_errors(
@@ -147,7 +188,7 @@ def test_send_papers_distinguishes_network_errors(
 
 def test_send_papers_nothing_resolves(env, monkeypatch):
     def fail(ref):
-        raise ValueError("nope")
+        raise ValueError(f"could not resolve: {ref}")
 
     monkeypatch.setattr(resolver, "resolve", fail)
     receipt = server.send_papers(["gibberish"])
@@ -409,7 +450,10 @@ def test_send_queue_mixed_items(
 ):
     items = [
         {"key": "GOOD", "data": {"url": "https://arxiv.org/abs/2401.12345"}},
-        {"key": "NOREF", "data": {"title": "No Ref"}},
+        {
+            "key": "TITLEONLY",
+            "data": {"title": "Title Only Paper", "url": "junk-landing"},
+        },
         {"key": "BROKEN", "data": {"title": "Broken", "url": "junk"}},
         {"key": "PAYWALL", "data": {"title": "Paywalled", "DOI": "10.1/x"}},
     ]
@@ -419,26 +463,34 @@ def test_send_queue_mixed_items(
     monkeypatch.setattr(zotero_client, "mark_no_pdf", no_pdf_tagged.append)
 
     def fake_resolve(ref):
-        if ref == "junk":
+        if ref in ("junk", "junk-landing", "Broken"):
             raise ValueError("nope")
         if ref == "10.1/x":
             return paper_factory(pdf_url=None)
+        if ref == "Title Only Paper":
+            return paper_factory(title="Title Only Paper", arxiv_id="3333.3")
         return paper_factory()
 
     monkeypatch.setattr(resolver, "resolve", fake_resolve)
     receipt = server.send_queue()
-    assert marked == ["GOOD"]
+    # the landing-URL-only item is rescued by its stored title
+    assert marked == ["GOOD", "TITLEONLY"]
     assert no_pdf_tagged == ["PAYWALL"]
-    assert "No Ref (no DOI or URL)" in receipt
     assert "Broken (unresolvable: junk)" in receipt
     assert "Paywalled (no open-access PDF — won't retry)" in receipt
 
 
 def test_send_queue_nothing_deliverable(env, monkeypatch):
-    items = [{"key": "NOREF", "data": {"title": "No Ref"}}]
+    items = [{"key": "X", "data": {"title": "Unfindable"}}]
     monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: (_ for _ in ()).throw(ValueError("nope")),
+    )
     receipt = server.send_queue()
     assert receipt.startswith("Nothing in the queue is deliverable")
+    assert "Unfindable (unresolvable: Unfindable)" in receipt
 
 
 # --- setup_status ----------------------------------------------------------

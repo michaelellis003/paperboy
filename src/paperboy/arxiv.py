@@ -24,6 +24,9 @@ _ID_PATTERN = re.compile(
 def normalize_id(id_or_url: str) -> str:
     """Accept '2401.12345', 'arXiv:2401.12345v2', or an abs/pdf URL."""
     text = id_or_url.strip().removeprefix("arXiv:").removeprefix("arxiv:")
+    # arXiv listing pages append query strings (?context=cs) that the
+    # end-anchored id pattern would otherwise choke on.
+    text = text.split("?", 1)[0].split("#", 1)[0]
     match = _ID_PATTERN.search(text.removesuffix(".pdf"))
     if not match:
         raise ValueError(f"Could not parse arXiv id from: {id_or_url!r}")

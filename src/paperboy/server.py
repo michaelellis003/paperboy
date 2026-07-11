@@ -58,17 +58,24 @@ def search_papers(
     ``source`` is 'all' (OpenAlex: journals, conferences, and preprint
     servers including arXiv — usually the better ranking, even for
     arXiv-native topics) or 'arxiv' (arXiv's own search; only better
-    for very recent preprints). Each result has a ``ref`` (DOI, arXiv
-    id, or exact title) to pass to send_papers / queue_papers.
+    for very recent preprints); unknown values fall back to 'all'.
+    ``max_results`` is capped at 25. Each result has a ``ref`` (arXiv
+    id, DOI, or exact title) to pass to send_papers / queue_papers.
     ``open_access_pdf`` means an OA PDF link was found; delivery can
     still fail if the link is dead (arXiv-hosted papers are the most
     reliable).
     """
     max_results = min(max_results, 25)
-    if source == "arxiv":
-        papers = arxiv.search(query, max_results=max_results)
-    else:
-        papers = openalex.search(query, max_results=max_results)
+    try:
+        if source == "arxiv":
+            papers = arxiv.search(query, max_results=max_results)
+        else:
+            papers = openalex.search(query, max_results=max_results)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"Search failed ({type(exc).__name__}): {exc} — retry, or "
+            "rephrase the query"
+        ) from exc
     return [_summary(paper) for paper in papers]
 
 
@@ -94,8 +101,24 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
     for ref in refs:
         try:
             paper = resolver.resolve(ref)
-        except ValueError:
-            problems.append(f"could not resolve: {ref}")
+        except ValueError as exc:
+            # The resolver's message is self-contained and may carry an
+            # actionable hint (e.g. "publisher landing URLs are not
+            # supported") — pass it through verbatim.
+            problems.append(str(exc))
+            continue
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                # 4xx is deterministic — retrying will never succeed.
+                problems.append(
+                    f"could not resolve: {ref} (backend rejected the "
+                    f"request: HTTP {exc.response.status_code})"
+                )
+            else:
+                problems.append(
+                    f"temporarily unreachable ({type(exc).__name__}): "
+                    f"{ref} — retry"
+                )
             continue
         except httpx.HTTPError as exc:
             problems.append(
@@ -370,20 +393,31 @@ def send_queue() -> str:
     """
     items = zotero_client.unsent_queue_items()
     if not items:
-        return "Reading Queue is empty (or everything was already sent)."
+        return (
+            "Reading Queue is empty (or everything was already sent; "
+            "items tagged no-oa-pdf are excluded — see list_queue)."
+        )
 
     downloaded, skipped = [], []
     for item in items:
         data = item["data"]
         title = data.get("title", item["key"])
-        ref = data.get("DOI") or data.get("url") or ""
-        if not ref:
-            skipped.append(f"{title} (no DOI or URL)")
+        # Try the strongest identifier first, but fall back to the
+        # stored title — items captured from landing-page-only works
+        # have no DOI and a URL the resolver rejects.
+        refs = [ref for ref in (data.get("DOI"), data.get("url"), title) if ref]
+        if not refs:
+            skipped.append(f"{title} (no DOI, URL, or title)")
             continue
-        try:
-            paper = resolver.resolve(ref)
-        except (ValueError, httpx.HTTPError):
-            skipped.append(f"{title} (unresolvable: {ref})")
+        paper = None
+        for ref in refs:
+            try:
+                paper = resolver.resolve(ref)
+                break
+            except (ValueError, httpx.HTTPError):
+                continue
+        if paper is None:
+            skipped.append(f"{title} (unresolvable: {refs[0]})")
             continue
         if not paper.pdf_url:
             zotero_client.mark_no_pdf(item["key"])

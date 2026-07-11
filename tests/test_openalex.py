@@ -43,6 +43,22 @@ def test_search_parses_work(env, monkeypatch):
     assert paper.pdf_url == "https://arxiv.org/pdf/1706.03762"
 
 
+def test_search_strips_wildcards_from_query(env, monkeypatch):
+    def handler(request):
+        # OpenAlex 400s on wildcard chars; they must never reach it
+        assert "?" not in request.url.params["search"]
+        assert "*" not in request.url.params["search"]
+        return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(
+        openalex,
+        "client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    openalex.search("Do Vision Transformers See Like CNNs?")
+    openalex.search("wildcard * query")
+
+
 def test_arxiv_id_strips_pdf_suffix(env, monkeypatch):
     work = {
         "id": "https://openalex.org/W3",

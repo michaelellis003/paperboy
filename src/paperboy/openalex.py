@@ -81,8 +81,12 @@ def _parse_work(work: dict) -> Paper:
 
 def search(query: str, max_results: int = 5) -> list[Paper]:
     """Search OpenAlex by relevance and return up to ``max_results``."""
+    # OpenAlex rejects wildcard characters in search strings with HTTP
+    # 400 — and titles ending in '?' are common. Spaces are equivalent
+    # for relevance search.
+    cleaned = query.replace("*", " ").replace("?", " ").strip()
     params: dict[str, str | int] = {
-        "search": query,
+        "search": cleaned,
         "per-page": max_results,
     }
     email = settings().polite_email

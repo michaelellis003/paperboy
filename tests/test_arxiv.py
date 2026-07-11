@@ -39,6 +39,8 @@ def _client(xml: str) -> httpx.Client:
         ("arxiv:2401.12345", "2401.12345"),
         ("https://arxiv.org/abs/2401.12345", "2401.12345"),
         ("https://arxiv.org/pdf/2401.12345.pdf", "2401.12345"),
+        ("https://arxiv.org/abs/2401.12345?context=cs", "2401.12345"),
+        ("https://arxiv.org/abs/2401.12345#section", "2401.12345"),
         ("math.GT/0309136", "math.GT/0309136"),
     ],
 )

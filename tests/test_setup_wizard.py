@@ -194,6 +194,7 @@ def test_run_kobo_flow(tmp_path, monkeypatch):
             "APPKEY",  # app key
             "n",  # open authorize URL?
             "authcode",  # OAuth code
+            "",  # contact email: empty is rejected, re-prompted
             "kobo@example.com",  # contact email for Unpaywall
             "n",  # Zotero?
             "n",  # remote?
