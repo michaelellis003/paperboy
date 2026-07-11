@@ -121,7 +121,10 @@ guardrails: `--max-instances=1`, scale-to-zero, the `us-central1`
 free-tier region (2M requests/month, shared across your billing
 account — a personal server stays free), and a $1/month budget with
 50%/100% alert thresholds that email your billing admins. Re-running
-the script is a clean sync (rotated secrets, no duplicates).
+the script is a clean sync (rotated secrets, no duplicates). One
+slow-burn item to know: each deploy stores a container image in
+Artifact Registry (~130 MB); past the 0.5 GB free tier that's pennies
+per month — prune old images occasionally if you redeploy often.
 
 Security model: when `PORT` is set (Cloud Run does this), paperboy
 serves Streamable HTTP at `/mcp` and **requires** `MCP_AUTH_TOKEN` — it
@@ -141,8 +144,10 @@ with yourself about your target client before deploying:
 |---|---|
 | Claude Code | Yes: `claude mcp add --transport http paperboy <URL>/mcp --header "Authorization: Bearer <token>"` |
 | Claude API (MCP connector) | Yes: `authorization_token` parameter |
-| Claude Team/Enterprise | Yes: an org admin can add the connector with a bearer credential |
-| **claude.ai individual (Pro/Max) & mobile** | **Not with a static token** — the custom-connector UI takes a URL plus optional OAuth client credentials only. The claude.ai path needs OAuth: FastMCP ships provider integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth` — on the roadmap |
+| claude.ai & mobile (any plan) | **Check your Add-connector dialog first.** Anthropic is slowly rolling out a beta "Request headers" section that accepts bearer tokens ([docs](https://claude.com/docs/connectors/custom/remote-mcp)) — if your dialog shows it, paste `Authorization: Bearer <token>` there. If it shows only URL + OAuth client fields, you don't have the beta yet, and the path is OAuth: FastMCP ships provider integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth` — on the roadmap |
+
+Support here is a moving target — verify against your own dialog
+rather than trusting any table, this one included.
 
 ### How credentials flow
 

@@ -99,6 +99,16 @@ if ! gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1; then
 fi
 
 if [[ -z "$BILLING_ACCOUNT" ]]; then
+  ACCOUNT_COUNT=$(gcloud billing accounts list --filter=open=true \
+    --format="value(name)" | wc -l | tr -d ' ')
+  if [[ "$ACCOUNT_COUNT" -gt 1 ]]; then
+    echo "You have ${ACCOUNT_COUNT} open billing accounts — pass the" >&2
+    echo "one to charge as the 2nd argument (never guessing which," >&2
+    echo "it could be an employer's):" >&2
+    gcloud billing accounts list --filter=open=true \
+      --format="table(name,displayName)" >&2
+    exit 1
+  fi
   BILLING_ACCOUNT=$(gcloud billing accounts list --filter=open=true \
     --format="value(name)" | head -1)
 fi
@@ -106,6 +116,7 @@ fi
   echo "No open billing account found; pass one as the 2nd arg." >&2
   exit 1
 }
+echo "==> Billing account: ${BILLING_ACCOUNT}"
 gcloud billing projects link "$PROJECT_ID" \
   --billing-account="$BILLING_ACCOUNT" >/dev/null
 
@@ -242,12 +253,11 @@ Connect a client:
       --header "Authorization: Bearer <your MCP_AUTH_TOKEN>"
   Claude API: pass the token as authorization_token on the MCP
     connector.
-  Claude Team/Enterprise: an org admin can add a custom connector
-    with the bearer credential.
-  claude.ai individual plans (web/mobile): custom connectors accept
-    OAuth only — a static bearer token cannot be entered there today.
-    See the README's "Connecting clients" table; OAuth support via
-    FastMCP providers is on the roadmap.
+  claude.ai / mobile: check your Add-connector dialog. If it has a
+    beta "Request headers" section (rolling out slowly), paste the
+    bearer header there; if it shows only URL + OAuth fields, you
+    need the OAuth path (FastMCP providers — roadmapped). See the
+    README's "Connecting clients" table.
 
 Cost guardrails in place: max 1 instance, scales to zero when idle,
 free-tier region (the free tier is shared across your billing
