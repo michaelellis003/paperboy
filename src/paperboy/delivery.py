@@ -16,11 +16,17 @@ import json
 import smtplib
 from email.message import EmailMessage
 
+import httpx
+
 from .config import Settings, settings
 from .net import client
 
 MAX_ATTACHMENTS = 25
 MAX_TOTAL_BYTES = 50 * 1024 * 1024
+# Target size when auto-splitting batches: Gmail (the common SMTP
+# provider) caps outgoing messages at ~25 MB even though Amazon
+# accepts 50 MB, so chunk to the stricter bound.
+CHUNK_TARGET_BYTES = 25 * 1024 * 1024
 
 _MIME_BY_EXTENSION = {
     ".pdf": ("application", "pdf"),
@@ -120,16 +126,21 @@ def _send_email(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
             content, maintype=maintype, subtype=subtype, filename=filename
         )
 
-    if cfg.smtp_port == 465:
-        smtp: smtplib.SMTP = smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port)
-    else:
-        smtp = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port)
-        smtp.starttls()
     try:
-        smtp.login(cfg.smtp_user, cfg.smtp_password)
-        smtp.send_message(msg)
-    finally:
-        smtp.quit()
+        if cfg.smtp_port == 465:
+            smtp: smtplib.SMTP = smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port)
+        else:
+            smtp = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port)
+            smtp.starttls()
+        try:
+            smtp.login(cfg.smtp_user, cfg.smtp_password)
+            smtp.send_message(msg)
+        finally:
+            smtp.quit()
+    except (OSError, smtplib.SMTPException) as exc:
+        raise DeliveryError(
+            f"SMTP delivery failed ({type(exc).__name__}): {exc}"
+        ) from exc
 
     return (
         f"Sent {len(documents)} document(s), {total / 1e6:.1f} MB total, "
@@ -138,15 +149,20 @@ def _send_email(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
 
 
 def _dropbox_access_token(cfg: Settings) -> str:
-    response = client.post(
-        _DROPBOX_TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": cfg.dropbox_refresh_token,
-            "client_id": cfg.dropbox_app_key,
-            "client_secret": cfg.dropbox_app_secret,
-        },
-    )
+    try:
+        response = client.post(
+            _DROPBOX_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": cfg.dropbox_refresh_token,
+                "client_id": cfg.dropbox_app_key,
+                "client_secret": cfg.dropbox_app_secret,
+            },
+        )
+    except httpx.HTTPError as exc:
+        raise DeliveryError(
+            f"Dropbox unreachable ({type(exc).__name__}): {exc}"
+        ) from exc
     if response.status_code != 200:
         raise DeliveryError(
             f"Dropbox token refresh failed ({response.status_code}): "
@@ -173,15 +189,21 @@ def _send_dropbox(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
         api_arg = json.dumps(
             {"path": f"{folder}/{filename}", "mode": "overwrite", "mute": True}
         )
-        response = client.post(
-            _DROPBOX_UPLOAD_URL,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Dropbox-API-Arg": api_arg,
-                "Content-Type": "application/octet-stream",
-            },
-            content=content,
-        )
+        try:
+            response = client.post(
+                _DROPBOX_UPLOAD_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Dropbox-API-Arg": api_arg,
+                    "Content-Type": "application/octet-stream",
+                },
+                content=content,
+            )
+        except httpx.HTTPError as exc:
+            raise DeliveryError(
+                f"Dropbox upload of {filename!r} failed "
+                f"({type(exc).__name__}): {exc}"
+            ) from exc
         if response.status_code != 200:
             raise DeliveryError(
                 f"Dropbox upload of {filename!r} failed "

@@ -13,7 +13,7 @@ from pyzotero import zotero
 
 from . import arxiv, doi
 from .config import settings
-from .models import Paper
+from .models import Paper, normalize_title
 
 NO_PDF_TAG = "no-oa-pdf"
 
@@ -65,7 +65,14 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
     ):
         return True
     doi = data.get("DOI", "")
-    return bool(paper.doi and doi and paper.doi.lower() == doi.lower())
+    if paper.doi and doi and paper.doi.lower() == doi.lower():
+        return True
+    # DOI- and arXiv-resolved forms of the same paper can share no id
+    # fields at all; the (normalized) title is the fallback bridge.
+    title = data.get("title", "")
+    return bool(
+        title and normalize_title(paper.title) == normalize_title(title)
+    )
 
 
 def find_item(paper: Paper) -> dict | None:

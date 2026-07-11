@@ -14,15 +14,16 @@ from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
 from . import arxiv, delivery, openalex, resolver, zotero_client
 from .config import settings
-from .models import Paper
+from .models import Paper, normalize_title
 
 mcp = FastMCP(
     "paperboy",
     instructions=(
         "Delivers research papers to the user's e-reader (Kindle, Kobo, "
         "PocketBook, ...) and organizes them in a Zotero reading queue. "
-        "Papers are referenced by arXiv id, DOI, URL, or title — so a "
-        "reading list from research can be sent directly. Use "
+        "Papers are referenced by arXiv id, DOI, arXiv/doi.org URL, or "
+        "title (publisher landing URLs won't resolve) — so a reading "
+        "list from research can be sent directly. Use "
         "send_papers when the user picks specific papers; send_queue "
         "flushes EVERY unsent queued item, so check list_queue first. "
         "Always relay delivery receipts — including sizes, skipped "
@@ -36,9 +37,10 @@ def _summary(paper: Paper) -> dict:
     if len(paper.authors) > 3:
         authors = [*authors, "et al."]
     return {
-        # Falls back to the exact title, which the resolver accepts —
-        # a bare landing URL would not round-trip into send_papers.
-        "ref": paper.doi or paper.arxiv_id or paper.title,
+        # arXiv id first (most reliable delivery), then DOI, then the
+        # exact title, which the resolver accepts — a bare landing URL
+        # would not round-trip into send_papers.
+        "ref": paper.arxiv_id or paper.doi or paper.title,
         "title": paper.title,
         "authors": authors,
         "published": paper.published,
@@ -62,6 +64,7 @@ def search_papers(
     still fail if the link is dead (arXiv-hosted papers are the most
     reliable).
     """
+    max_results = min(max_results, 25)
     if source == "arxiv":
         papers = arxiv.search(query, max_results=max_results)
     else:
@@ -99,10 +102,21 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
                 f"temporarily unreachable ({type(exc).__name__}): {ref} — retry"
             )
             continue
-        key = paper.doi or paper.arxiv_id or paper.title.lower()
-        if key in seen:
+        # A paper referenced by DOI and by arXiv id may share no id
+        # fields, so every identity — including the normalized title —
+        # participates in dedup.
+        keys = {
+            key
+            for key in (
+                paper.doi,
+                paper.arxiv_id,
+                normalize_title(paper.title),
+            )
+            if key
+        }
+        if keys & seen:
             continue
-        seen.add(key)
+        seen |= keys
         resolved.append(paper)
     return resolved, problems
 
@@ -130,7 +144,7 @@ def _chunk(
     for name, content in documents:
         if current and (
             len(current) >= delivery.MAX_ATTACHMENTS
-            or size + len(content) > delivery.MAX_TOTAL_BYTES
+            or size + len(content) > delivery.CHUNK_TARGET_BYTES
         ):
             batches.append(current)
             current, size = [], 0
@@ -165,7 +179,11 @@ def _deliver(documents: list[tuple[str, bytes]]) -> tuple[str, set[str]]:
 def send_papers(
     papers: list[str], force: bool = False, dry_run: bool = False
 ) -> str:
-    """Send papers to the e-reader by arXiv id, DOI, URL, or title.
+    """Send papers to the e-reader by arXiv id, DOI, or title.
+
+    Accepted refs: arXiv ids ('2401.12345', 'arXiv:...'), arXiv
+    abs/pdf URLs, DOIs, doi.org URLs, and paper titles. Publisher
+    landing-page URLs are NOT resolvable — use the DOI or title.
 
     Refs are deduplicated, and papers already tagged as sent in Zotero
     are skipped unless force=True. Large batches are split
@@ -197,14 +215,18 @@ def send_papers(
     if dry_run:
         lines = []
         total = 0.0
+        unknown = 0
         for paper in sendable:
             size = resolver.probe_pdf_size(paper)
             mb = f"{size / 1e6:.1f} MB" if size else "size unknown"
             total += (size or 0) / 1e6
+            unknown += 0 if size else 1
             lines.append(f"{paper.title} ({mb})")
+        headline = f"Would send {len(sendable)} paper(s), ~{total:.1f} MB"
+        if unknown:
+            headline += f" + {unknown} of unknown size"
         parts = [
-            f"Would send {len(sendable)} paper(s), ~{total:.1f} MB: "
-            + "; ".join(lines)
+            headline + ": " + "; ".join(lines)
             if lines
             else "Nothing would be sent."
         ]
@@ -282,10 +304,13 @@ def queue_papers(papers: list[str]) -> str:
     """
     zotero_client.ensure_configured()
     resolved, problems = _resolve_all(papers)
-    new, existing = [], []
+    new, existing, no_pdf = [], [], []
     for paper in resolved:
-        _, created = zotero_client.add_paper(paper)
+        item_key, created = zotero_client.add_paper(paper)
         (new if created else existing).append(paper.title)
+        if not paper.pdf_url:
+            zotero_client.mark_no_pdf(item_key)
+            no_pdf.append(paper.title)
     if not resolved:
         return "Nothing was queued. " + "; ".join(problems)
     queue = settings().reading_queue_collection
@@ -294,6 +319,12 @@ def queue_papers(papers: list[str]) -> str:
         parts[0] += ": " + "; ".join(new)
     if existing:
         parts.append(f"already in queue: {'; '.join(existing)}")
+    if no_pdf:
+        parts.append(
+            "no open-access PDF (won't be auto-sent): "
+            + "; ".join(no_pdf)
+            + _oa_hint()
+        )
     if problems:
         parts.append("; ".join(problems))
     return " | ".join(parts)

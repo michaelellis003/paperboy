@@ -43,6 +43,19 @@ def test_search_parses_work(env, monkeypatch):
     assert paper.pdf_url == "https://arxiv.org/pdf/1706.03762"
 
 
+def test_arxiv_id_strips_pdf_suffix(env, monkeypatch):
+    work = {
+        "id": "https://openalex.org/W3",
+        "display_name": "Old Style",
+        "primary_location": {
+            "landing_page_url": "https://arxiv.org/pdf/1111.4246.pdf"
+        },
+    }
+    monkeypatch.setattr(openalex, "client", _client([work]))
+    paper = openalex.search("q")[0]
+    assert paper.arxiv_id == "1111.4246"
+
+
 def test_search_handles_sparse_work(env, monkeypatch):
     sparse = {"id": "https://openalex.org/W2"}
     monkeypatch.setattr(openalex, "client", _client([sparse]))

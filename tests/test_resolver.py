@@ -92,6 +92,49 @@ def test_download_falls_back_to_arxiv(monkeypatch, paper_factory):
     assert resolver.download_pdf(paper) == b"%PDF-arxiv"
 
 
+def test_download_rejects_html_masquerading_as_pdf(monkeypatch, paper_factory):
+    def handler(request):
+        if request.url.host == "arxiv.org":
+            return httpx.Response(200, content=b"%PDF-real")
+        return httpx.Response(
+            200,
+            content=b"<html>Incapsula anti-bot page</html>",
+            headers={"content-type": "text/html"},
+        )
+
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    paper = paper_factory(pdf_url="https://blocked.invalid/x.pdf")
+    assert resolver.download_pdf(paper) == b"%PDF-real"
+
+
+def test_download_all_candidates_non_pdf_raises(monkeypatch, paper_factory):
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200,
+                    content=b"<html>nope</html>",
+                    headers={"content-type": "text/html"},
+                )
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="non-PDF content"):
+        resolver.download_pdf(paper_factory())
+
+
+def test_publisher_url_error_includes_hint(monkeypatch):
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="publisher landing URLs"):
+        resolver.resolve("https://www.nature.com/articles/s41586-x")
+
+
 def test_download_reports_cause_when_all_fail(monkeypatch, paper_factory):
     monkeypatch.setattr(
         resolver,

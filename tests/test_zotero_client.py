@@ -98,6 +98,23 @@ def test_add_paper_rejected_by_zotero(fake_api, paper_factory):
         zotero_client.add_paper(paper_factory())
 
 
+def test_matches_on_normalized_title(fake_api, paper_factory):
+    fake_api.items = [
+        {
+            "key": "K1",
+            "data": {
+                "title": "Observation of a New Particle!",
+                "DOI": "10.1016/j.physletb.2012.08.020",
+            },
+        }
+    ]
+    arxiv_form = paper_factory(
+        title="Observation of a new particle", arxiv_id="1207.7214", doi=None
+    )
+    item = zotero_client.find_item(arxiv_form)
+    assert item is not None and item["key"] == "K1"
+
+
 def test_matches_on_archive_id(fake_api, paper_factory):
     fake_api.items = [
         {

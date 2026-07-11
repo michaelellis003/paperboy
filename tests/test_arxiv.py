@@ -4,7 +4,8 @@ import pytest
 from paperboy import arxiv
 
 ATOM = """<?xml version="1.0"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
   <entry>
     <id>http://arxiv.org/abs/2401.12345v2</id>
     <title>A  Test
@@ -13,6 +14,7 @@ ATOM = """<?xml version="1.0"?>
     <author><name>Ada Lovelace</name></author>
     <author><name>Alan Turing</name></author>
     <published>2024-01-20T12:00:00Z</published>
+    <arxiv:doi>10.1016/j.example.2024.01</arxiv:doi>
   </entry>
 </feed>"""
 
@@ -59,6 +61,8 @@ def test_get_paper_parses_entry(monkeypatch):
     assert paper.url == "https://arxiv.org/abs/2401.12345"
     assert paper.pdf_url == "https://arxiv.org/pdf/2401.12345"
     assert paper.safe_filename == "A_Test_Paper_2401.12345.pdf"
+    # arXiv reports the journal DOI so DOI/arXiv forms deduplicate
+    assert paper.doi == "10.1016/j.example.2024.01"
 
 
 def test_get_paper_not_found(monkeypatch):

@@ -9,6 +9,7 @@ per MCP elicitation security guidance.
 
 import argparse
 import getpass
+import os
 import re
 import secrets
 import smtplib
@@ -55,6 +56,8 @@ def update_env(values: dict[str, str], path: str = ".env") -> None:
         updated.append(f"{key}={quote(value)}")
     with open(path, "w") as handle:
         handle.write("\n".join(updated) + "\n")
+    # The file holds credentials — restrict it to the owner.
+    os.chmod(path, 0o600)
 
 
 # --- validators -----------------------------------------------------------
@@ -283,6 +286,13 @@ _DEVICES = {
 
 def run(argv: list[str] | None = None) -> None:
     """Run the interactive wizard and write .env."""
+    try:
+        _run(argv)
+    except (KeyboardInterrupt, EOFError):
+        print("\nSetup aborted — nothing was written.")
+
+
+def _run(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="paperboy setup")
     parser.add_argument("--env", default=".env", help="path to .env file")
     args = parser.parse_args(argv)

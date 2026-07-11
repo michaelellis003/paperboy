@@ -13,7 +13,9 @@ from .models import Paper
 from .net import client
 
 _API = "https://api.openalex.org/works"
-_ARXIV_ABS = re.compile(r"arxiv\.org/(?:abs|pdf)/([^\s?#]+?)(?:v\d+)?$")
+_ARXIV_ABS = re.compile(
+    r"arxiv\.org/(?:abs|pdf)/([^\s?#]+?)(?:v\d+)?(?:\.pdf)?$"
+)
 
 
 def _abstract_from_inverted_index(index: dict | None) -> str:

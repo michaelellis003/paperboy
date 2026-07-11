@@ -162,6 +162,23 @@ def test_send_papers_dedupes_refs_in_call(
     assert len(sent_documents) == 1
 
 
+def test_send_papers_dedupes_doi_and_arxiv_forms(
+    env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    # Same paper: DOI-resolved form has no arXiv id, arXiv form has no
+    # DOI — only the normalized title connects them.
+    doi_form = paper_factory(
+        title="Observation of a New Particle!", arxiv_id=None, doi="10.1/h"
+    )
+    arxiv_form = paper_factory(
+        title="Observation of a new particle", arxiv_id="1207.7214", doi=None
+    )
+    papers = iter([doi_form, arxiv_form])
+    monkeypatch.setattr(resolver, "resolve", lambda ref: next(papers))
+    server.send_papers(["10.1/h", "1207.7214"])
+    assert len(sent_documents) == 1
+
+
 def test_send_papers_skips_already_sent(
     zotero_env, monkeypatch, paper_factory, sent_documents, no_download
 ):
@@ -242,6 +259,8 @@ def test_send_papers_dry_run_unknown_size(env, monkeypatch, paper_factory):
     monkeypatch.setattr(resolver, "probe_pdf_size", lambda p: None)
     receipt = server.send_papers(["2401.12345"], dry_run=True)
     assert "size unknown" in receipt
+    # the headline total must not silently count unknowns as zero
+    assert "+ 1 of unknown size" in receipt
 
 
 # --- chunking --------------------------------------------------------------
@@ -334,6 +353,20 @@ def test_queue_papers_nothing_resolves(env, zotero_ok, monkeypatch):
     monkeypatch.setattr(resolver, "resolve", fail)
     receipt = server.queue_papers(["gibberish"])
     assert receipt.startswith("Nothing was queued")
+
+
+def test_queue_papers_tags_no_pdf_at_queue_time(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    tagged = []
+    monkeypatch.setattr(
+        resolver, "resolve", lambda ref: paper_factory(pdf_url=None)
+    )
+    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
+    receipt = server.queue_papers(["10.1/x"])
+    assert tagged == ["KEY"]
+    assert "no open-access PDF (won't be auto-sent)" in receipt
 
 
 def test_queue_papers_fails_fast_without_zotero(env, monkeypatch):

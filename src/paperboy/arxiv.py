@@ -14,6 +14,7 @@ from .net import client
 
 _API = "https://export.arxiv.org/api/query"
 _ATOM = "{http://www.w3.org/2005/Atom}"
+_ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 # New-style (2401.12345) and pre-2007 (math.GT/0309136) identifiers
 _ID_PATTERN = re.compile(
     r"(\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?$"
@@ -47,6 +48,10 @@ def _parse_entry(entry: ET.Element) -> Paper:
         url=f"https://arxiv.org/abs/{arxiv_id}",
         pdf_url=f"https://arxiv.org/pdf/{arxiv_id}",
         arxiv_id=arxiv_id,
+        # arXiv reports the journal DOI when the paper was published —
+        # capturing it lets DOI- and arXiv-referenced forms of the same
+        # paper deduplicate against each other.
+        doi=entry.findtext(f"{_ARXIV_NS}doi") or None,
     )
 
 

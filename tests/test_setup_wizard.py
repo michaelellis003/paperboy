@@ -19,6 +19,17 @@ def test_update_env_creates_file(tmp_path):
     path = tmp_path / ".env"
     setup_wizard.update_env({"A": "1", "B": "two words"}, path=str(path))
     assert path.read_text() == 'A=1\nB="two words"\n'
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_run_aborts_cleanly_on_eof(tmp_path, monkeypatch, capsys):
+    def eof(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", eof)
+    setup_wizard.run(["--env", str(tmp_path / ".env")])
+    assert "Setup aborted" in capsys.readouterr().out
+    assert not (tmp_path / ".env").exists()
 
 
 def test_update_env_preserves_comments_and_updates(tmp_path):

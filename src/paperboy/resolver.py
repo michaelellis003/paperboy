@@ -9,20 +9,14 @@ the e-reader is worse than a lookup failure.
 """
 
 import difflib
-import re
 
 import httpx
 
 from . import arxiv, doi, openalex
-from .models import Paper
+from .models import Paper, normalize_title
 from .net import client
 
 _TITLE_MATCH_THRESHOLD = 0.8
-_WORDS = re.compile(r"[^a-z0-9 ]")
-
-
-def _normalize(text: str) -> str:
-    return " ".join(_WORDS.sub(" ", text.lower()).split())
 
 
 def _resolve_title(ref: str) -> Paper | None:
@@ -31,7 +25,7 @@ def _resolve_title(ref: str) -> Paper | None:
         return None
     hit = matches[0]
     ratio = difflib.SequenceMatcher(
-        None, _normalize(ref), _normalize(hit.title)
+        None, normalize_title(ref), normalize_title(hit.title)
     ).ratio()
     if ratio < _TITLE_MATCH_THRESHOLD:
         return None
@@ -61,9 +55,15 @@ def resolve(ref: str) -> Paper:
     paper = _resolve_title(ref)
     if paper:
         return paper
+    hint = (
+        " (publisher landing URLs are not supported — try the DOI or "
+        "exact title)"
+        if ref.startswith(("http://", "https://"))
+        else ""
+    )
     raise ValueError(
         f"Could not resolve {ref!r} as an arXiv id, DOI, or "
-        "confidently-matching title"
+        f"confidently-matching title{hint}"
     )
 
 
@@ -91,9 +91,19 @@ def download_pdf(paper: Paper) -> bytes:
         try:
             response = client.get(url)
             response.raise_for_status()
-            return response.content
         except httpx.HTTPError as exc:
             last_error = exc
+            continue
+        # OA links sometimes return HTTP 200 with an HTML anti-bot or
+        # landing page — shipping that to an e-reader as a "PDF" is
+        # worse than failing, so verify the payload really is one.
+        if b"%PDF-" not in response.content[:1024]:
+            content_type = response.headers.get("content-type", "unknown")
+            last_error = ValueError(
+                f"{url} returned non-PDF content ({content_type})"
+            )
+            continue
+        return response.content
     raise ValueError(
         f"Could not download PDF for {paper.title!r}: {last_error}"
     )

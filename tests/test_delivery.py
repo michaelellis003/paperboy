@@ -135,6 +135,15 @@ def _dropbox_client(uploads, token_status=200, upload_status=200):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def test_smtp_network_error_becomes_delivery_error(env, monkeypatch):
+    def refuse(host, port):
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+    with pytest.raises(delivery.DeliveryError, match="SMTP delivery failed"):
+        delivery.send_documents([DOC])
+
+
 def test_email_receipt_reports_sizes(env, monkeypatch):
     monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
     receipt = delivery.send_documents([("big.pdf", b"x" * 2_000_000)])

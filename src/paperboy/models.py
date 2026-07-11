@@ -3,6 +3,13 @@
 import re
 from dataclasses import dataclass
 
+_WORDS = re.compile(r"[^a-z0-9 ]")
+
+
+def normalize_title(text: str) -> str:
+    """Lowercased, punctuation-free title for matching/dedup."""
+    return " ".join(_WORDS.sub(" ", text.lower()).split())
+
 
 @dataclass
 class Paper:
