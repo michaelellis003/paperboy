@@ -15,10 +15,15 @@ from .net import client
 _API = "https://export.arxiv.org/api/query"
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _ARXIV_NS = "{http://arxiv.org/schemas/atom}"
-# New-style (2401.12345) and pre-2007 (math.GT/0309136) identifiers
+# New-style (2401.12345) and pre-2007 (math.GT/0309136,
+# cond-mat.str-el/0309136) identifiers
 _ID_PATTERN = re.compile(
-    r"(\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?$"
+    r"(\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Za-z-]+)?/\d{7})(v\d+)?$"
 )
+# The API only accepts old-style ids WITHOUT the subject class
+# (math/0309136, not math.GT/0309136), though the class form is the
+# canonical citation format.
+_SUBJECT_CLASS = re.compile(r"^([a-z-]+)\.[A-Za-z-]+/")
 
 
 def normalize_id(id_or_url: str) -> str:
@@ -30,7 +35,7 @@ def normalize_id(id_or_url: str) -> str:
     match = _ID_PATTERN.search(text.removesuffix(".pdf"))
     if not match:
         raise ValueError(f"Could not parse arXiv id from: {id_or_url!r}")
-    return match.group(1)
+    return _SUBJECT_CLASS.sub(r"\1/", match.group(1))
 
 
 def _parse_entry(entry: ET.Element) -> Paper:

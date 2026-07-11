@@ -41,7 +41,11 @@ def _client(xml: str) -> httpx.Client:
         ("https://arxiv.org/pdf/2401.12345.pdf", "2401.12345"),
         ("https://arxiv.org/abs/2401.12345?context=cs", "2401.12345"),
         ("https://arxiv.org/abs/2401.12345#section", "2401.12345"),
-        ("math.GT/0309136", "math.GT/0309136"),
+        # subject classes are stripped — the API rejects them
+        ("math.GT/0309136", "math/0309136"),
+        ("cond-mat.str-el/0211002", "cond-mat/0211002"),
+        ("arXiv:math.GT/0309136v2", "math/0309136"),
+        ("math/0309136", "math/0309136"),
     ],
 )
 def test_normalize_id(ref, expected):
