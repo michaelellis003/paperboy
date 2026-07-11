@@ -140,8 +140,7 @@ uv for packaging, ruff (Google style), ty, pytest behind an enforced
 
 ## Prior art & acknowledgments
 
-paperboy contains no code from other projects; everything in `src/` is
-original. Ideas it builds on: the tag-driven Zotero→Kindle idea from
+Ideas paperboy builds on: the tag-driven Zotero→Kindle idea from
 [stakats/zotero-to-kindle](https://github.com/stakats/zotero-to-kindle)
 (circa 2011, by one of Zotero's original directors);
 [wahiggins3/send-to-kindle-mcp](https://github.com/wahiggins3/send-to-kindle-mcp);
