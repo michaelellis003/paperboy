@@ -64,28 +64,37 @@ gcloud projects list --limit=1 >/dev/null 2>&1 || {
   exit 1
 }
 
-# Read .env LITERALLY — never `source` it. Sourcing evaluates values
-# as shell: a password containing $ or backticks would silently
-# expand/execute here while python-dotenv (what the local server
-# uses) takes it literally — storing a corrupted secret in Secret
-# Manager and producing an undebuggable local-works-cloud-doesn't
-# split. This parser strips one layer of surrounding quotes and
-# performs no expansion of any kind.
-while IFS= read -r line || [[ -n "$line" ]]; do
-  [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
-  key="${line%%=*}"
-  value="${line#*=}"
-  [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
-  if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value//\\\"/\"}"
-  elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then
-    value="${value#\'}"
-    value="${value%\'}"
-  fi
-  export "$key=$value"
-done < "$ENV_FILE"
+# Parse .env with python-dotenv — the EXACT parser the local server
+# uses — so cloud and local can never disagree about what a value is.
+# (Never `source` it: shell evaluation corrupts passwords containing
+# $ or backticks; a hand-rolled parser diverges on dotenv-isms like
+# inline comments, 'export ' prefixes, or spaces around '='.) Only
+# the allowlisted variables are exported, so a stray PATH= line in
+# .env cannot hijack this script.
+command -v uv >/dev/null || {
+  echo "uv is required (same tool as 'uv run paperboy setup'):" >&2
+  echo "  https://docs.astral.sh/uv/getting-started/installation/" >&2
+  exit 1
+}
+DOTENV_EXPORTS="$(uv run --directory "$REPO_ROOT" python - "$ENV_FILE" \
+  "${SECRET_VARS[@]}" "${PLAIN_VARS[@]}" KINDLE_EMAIL <<'PY'
+import shlex
+import sys
+
+from dotenv import dotenv_values
+
+env_file, *allowed = sys.argv[1:]
+values = dotenv_values(env_file)
+for key in allowed:
+    value = values.get(key)
+    if value:
+        print(f"export {key}={shlex.quote(value)}")
+PY
+)" || {
+  echo "Failed to parse ${ENV_FILE} with python-dotenv." >&2
+  exit 1
+}
+eval "$DOTENV_EXPORTS"
 
 # The app accepts KINDLE_EMAIL as an alias for DEVICE_EMAIL; honor it
 # here too, or alias users deploy a cloud instance with no device.
@@ -237,11 +246,12 @@ if ! gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
     --threshold-rule=percent=0.5 \
     --threshold-rule=percent=1.0 \
     --filter-projects="projects/${PROJECT_ID}" >/dev/null 2>&1; then
-    BUDGET_NOTE="Could not create the budget (needs Billing Account
-Costs Manager). Create it manually — WITH alert thresholds, they are
-not added by default:
+    BUDGET_NOTE="Could not create the budget (common causes: you lack
+Billing Account Costs Manager, or your billing account's currency is
+not USD — the script requests 1USD). Create it manually — WITH alert
+thresholds, they are not added by default:
   https://console.cloud.google.com/billing/budgets
-  (\$1/month scoped to project ${PROJECT_ID}, thresholds 50%/100%)"
+  (~\$1/month equivalent scoped to ${PROJECT_ID}, thresholds 50%/100%)"
   fi
 fi
 
