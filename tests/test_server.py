@@ -430,6 +430,34 @@ def test_setup_status_email_ready(env):
     assert status["delivery_ready"] is True
     assert status["email_backend_configured"] is True
     assert status["dropbox_backend_configured"] is False
+    assert status["open_access_lookup_ready"] is True
+
+
+def test_setup_status_warns_without_polite_email(env):
+    env.setenv("FROM_EMAIL", "")
+    env.setenv("CONTACT_EMAIL", "")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    status = server.setup_status()
+    assert status["open_access_lookup_ready"] is False
+    assert any("CONTACT_EMAIL" in step for step in status["next_steps"])
+
+
+def test_no_pdf_receipt_hints_when_lookup_disabled(
+    env, monkeypatch, paper_factory
+):
+    env.setenv("FROM_EMAIL", "")
+    env.setenv("CONTACT_EMAIL", "")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    monkeypatch.setattr(
+        resolver, "resolve", lambda ref: paper_factory(pdf_url=None)
+    )
+    receipt = server.send_papers(["10.1/x"])
+    assert "open-access PDF lookup is disabled" in receipt
+    assert "CONTACT_EMAIL" in receipt
 
 
 # --- auth ------------------------------------------------------------------

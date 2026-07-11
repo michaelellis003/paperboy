@@ -72,6 +72,11 @@ def get_paper(doi: str) -> Paper:
 def _oa_pdf_url(doi: str) -> str | None:
     """Find a direct open-access PDF link via Unpaywall, if any."""
     email = settings().polite_email
+    if not email:
+        # Unpaywall rejects requests without a contact email (HTTP
+        # 422). Skip the doomed call; setup_status and send receipts
+        # tell the user to set CONTACT_EMAIL.
+        return None
     response = client.get(_UNPAYWALL + doi, params={"email": email})
     if response.status_code != 200:
         return None

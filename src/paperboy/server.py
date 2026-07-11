@@ -69,6 +69,16 @@ def search_papers(
     return [_summary(paper) for paper in papers]
 
 
+def _oa_hint() -> str:
+    """Warn when open-access lookup is disabled by missing config."""
+    if settings().polite_email:
+        return ""
+    return (
+        " [open-access PDF lookup is disabled: no contact email is "
+        "configured — set CONTACT_EMAIL or run 'paperboy setup']"
+    )
+
+
 def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
     """Resolve refs independently, deduplicating within the call.
 
@@ -230,6 +240,7 @@ def send_papers(
             + queued_note
             + " "
             + "; ".join(skips + problems)
+            + (_oa_hint() if no_pdf else "")
         )
 
     documents = [
@@ -252,7 +263,7 @@ def send_papers(
             if settings().zotero_enabled
             else "No open-access PDF, not sent"
         )
-        receipt += f" | {note}: {titles}"
+        receipt += f" | {note}: {titles}{_oa_hint()}"
     if already_sent:
         titles = "; ".join(paper.title for paper in already_sent)
         receipt += f" | Already sent, skipped (force=True to resend): {titles}"
@@ -345,7 +356,9 @@ def send_queue() -> str:
             continue
         if not paper.pdf_url:
             zotero_client.mark_no_pdf(item["key"])
-            skipped.append(f"{title} (no open-access PDF — won't retry)")
+            skipped.append(
+                f"{title} (no open-access PDF — won't retry){_oa_hint()}"
+            )
             continue
         try:
             content = resolver.download_pdf(paper)
@@ -362,9 +375,11 @@ def send_queue() -> str:
 
     documents = [(name, content) for _, name, content in downloaded]
     receipt, delivered = _deliver(documents)
-    for item_key, name, _ in downloaded:
-        if name in delivered:
-            zotero_client.mark_sent(item_key)
+    marked = [item_key for item_key, name, _ in downloaded if name in delivered]
+    for item_key in marked:
+        zotero_client.mark_sent(item_key)
+    if marked:
+        receipt += " (tagged sent in Zotero)"
     if skipped:
         receipt += f" | Skipped: {'; '.join(skipped)}"
     return receipt
@@ -406,6 +421,12 @@ def setup_status() -> dict:
             "terminal; it asks which e-reader you have and walks "
             "through only the credentials that device needs."
         )
+    if not cfg.polite_email:
+        next_steps.append(
+            "Set CONTACT_EMAIL (any email you own) — Unpaywall's "
+            "open-access PDF lookup requires one; without it, "
+            "non-arXiv papers cannot be delivered."
+        )
     if not cfg.zotero_enabled:
         next_steps.append(
             "Optional: connect Zotero for the reading queue — "
@@ -416,6 +437,7 @@ def setup_status() -> dict:
         "delivery_ready": delivery_ready,
         "email_backend_configured": email_ready,
         "dropbox_backend_configured": dropbox_ready,
+        "open_access_lookup_ready": bool(cfg.polite_email),
         "zotero_configured": cfg.zotero_enabled,
         "next_steps": next_steps,
     }

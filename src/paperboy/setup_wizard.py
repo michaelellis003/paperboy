@@ -221,12 +221,19 @@ def _setup_dropbox(folder: str, full_access: bool) -> dict[str, str]:
         token, error = exchange_dropbox_code(app_key, app_secret, code)
         if token:
             print("Dropbox authorized — refresh token stored.")
+            print(
+                "\nOpen-access PDF lookup (Unpaywall) requires a "
+                "contact email; without one, non-arXiv papers cannot "
+                "be delivered."
+            )
+            contact = _ask("Contact email (any address you own)")
             return {
                 "DELIVERY_METHOD": "dropbox",
                 "DROPBOX_APP_KEY": app_key,
                 "DROPBOX_APP_SECRET": app_secret,
                 "DROPBOX_REFRESH_TOKEN": token,
                 "DROPBOX_FOLDER": folder,
+                "CONTACT_EMAIL": contact,
             }
         print(f"{error}\nLet's try again.")
 

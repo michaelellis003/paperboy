@@ -96,3 +96,22 @@ def test_unpaywall_failure_means_no_pdf(env, monkeypatch):
     monkeypatch.setattr(doi, "client", _client(unpaywall_status=422))
     paper = doi.get_paper("10.1371/journal.pcbi.1003285")
     assert paper.pdf_url is None
+
+
+def test_no_polite_email_skips_unpaywall_entirely(env, monkeypatch):
+    env.setenv("FROM_EMAIL", "")
+    env.setenv("CONTACT_EMAIL", "")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+
+    def handler(request):
+        if request.url.host == "api.crossref.org":
+            return httpx.Response(200, json=CROSSREF)
+        raise AssertionError("Unpaywall must not be called without email")
+
+    monkeypatch.setattr(
+        doi, "client", httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    paper = doi.get_paper("10.1371/journal.pcbi.1003285")
+    assert paper.pdf_url is None

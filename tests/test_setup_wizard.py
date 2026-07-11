@@ -183,6 +183,7 @@ def test_run_kobo_flow(tmp_path, monkeypatch):
             "APPKEY",  # app key
             "n",  # open authorize URL?
             "authcode",  # OAuth code
+            "kobo@example.com",  # contact email for Unpaywall
             "n",  # Zotero?
             "n",  # remote?
         ]
@@ -204,3 +205,4 @@ def test_run_kobo_flow(tmp_path, monkeypatch):
     assert "DELIVERY_METHOD=dropbox" in content
     assert 'DROPBOX_FOLDER="/Apps/Rakuten Kobo"' in content
     assert "DROPBOX_REFRESH_TOKEN=REFRESH" in content
+    assert "CONTACT_EMAIL=kobo@example.com" in content
