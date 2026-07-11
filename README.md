@@ -2,7 +2,10 @@
 
 An MCP server that delivers research papers to your e-reader, with Zotero as
 the source of truth. Ask Claude for a reading list, then say "queue them and
-send to my Kindle" — from any Claude client, including claude.ai and mobile.
+send to my Kindle" — locally in Claude Code/Desktop today, and remotely via
+Cloud Run (Claude Code, the API, and Team/Enterprise connectors now;
+individual claude.ai/mobile needs the OAuth roadmap item — see
+"Connecting clients" below).
 
 ## Architecture
 
@@ -124,14 +127,22 @@ Security model: when `PORT` is set (Cloud Run does this), paperboy
 serves Streamable HTTP at `/mcp` and **requires** `MCP_AUTH_TOKEN` — it
 refuses to start unauthenticated, because the server can send email as
 you. Requests without the token are rejected with 401 in microseconds,
-before any tool logic runs. Ingress is public because claude.ai
-connectors cannot send Google IAM tokens; the bearer token is the gate.
-For OAuth instead of a static token, FastMCP ships provider
-integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth`.
+before any tool logic runs. Ingress is public because Claude clients
+cannot send Google IAM tokens; the bearer token is the gate. One
+expectation to set: the budget **emails** you at 50%/100% — it does
+not cap billing — so react to the 50% alert if it ever fires.
 
-Then add it in claude.ai → Settings → Connectors → Add custom connector
-with the service URL + `/mcp`, supplying the token as the Authorization
-header (`Bearer <token>`).
+### Connecting clients to the remote server
+
+Which clients accept the static bearer token differs, so be honest
+with yourself about your target client before deploying:
+
+| Client | Works today? |
+|---|---|
+| Claude Code | Yes: `claude mcp add --transport http paperboy <URL>/mcp --header "Authorization: Bearer <token>"` |
+| Claude API (MCP connector) | Yes: `authorization_token` parameter |
+| Claude Team/Enterprise | Yes: an org admin can add the connector with a bearer credential |
+| **claude.ai individual (Pro/Max) & mobile** | **Not with a static token** — the custom-connector UI takes a URL plus optional OAuth client credentials only. The claude.ai path needs OAuth: FastMCP ships provider integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth` — on the roadmap |
 
 ### How credentials flow
 

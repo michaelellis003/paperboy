@@ -236,11 +236,21 @@ cat <<DONE
   MCP endpoint:  ${URL}/mcp
   Auth:          Bearer token from MCP_AUTH_TOKEN in your .env
 
-claude.ai -> Settings -> Connectors -> Add custom connector:
-  URL: ${URL}/mcp
-  and supply the bearer token.
+Connect a client:
+  Claude Code:
+    claude mcp add --transport http paperboy ${URL}/mcp \\
+      --header "Authorization: Bearer <your MCP_AUTH_TOKEN>"
+  Claude API: pass the token as authorization_token on the MCP
+    connector.
+  Claude Team/Enterprise: an org admin can add a custom connector
+    with the bearer credential.
+  claude.ai individual plans (web/mobile): custom connectors accept
+    OAuth only — a static bearer token cannot be entered there today.
+    See the README's "Connecting clients" table; OAuth support via
+    FastMCP providers is on the roadmap.
 
 Cost guardrails in place: max 1 instance, scales to zero when idle,
 free-tier region (the free tier is shared across your billing
-account). ${BUDGET_NOTE}
+account). Note: the budget EMAILS you at 50%/100% — it does not cap
+billing. ${BUDGET_NOTE}
 DONE
