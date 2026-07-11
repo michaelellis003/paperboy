@@ -63,10 +63,29 @@ gcloud projects list --limit=1 >/dev/null 2>&1 || {
   echo "No .env at ${ENV_FILE} — run 'uv run paperboy setup' first." >&2
   exit 1
 }
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
+
+# Read .env LITERALLY — never `source` it. Sourcing evaluates values
+# as shell: a password containing $ or backticks would silently
+# expand/execute here while python-dotenv (what the local server
+# uses) takes it literally — storing a corrupted secret in Secret
+# Manager and producing an undebuggable local-works-cloud-doesn't
+# split. This parser strips one layer of surrounding quotes and
+# performs no expansion of any kind.
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+  key="${line%%=*}"
+  value="${line#*=}"
+  [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+  if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value//\\\"/\"}"
+  elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then
+    value="${value#\'}"
+    value="${value%\'}"
+  fi
+  export "$key=$value"
+done < "$ENV_FILE"
 
 # The app accepts KINDLE_EMAIL as an alias for DEVICE_EMAIL; honor it
 # here too, or alias users deploy a cloud instance with no device.
@@ -200,6 +219,32 @@ if [[ ${#SET_ENV[@]} -gt 0 ]]; then
   DEPLOY_FLAGS+=(--set-env-vars "$(join_flags "${SET_ENV[@]}")")
 fi
 
+# Budget BEFORE the deploy: a first run that dies mid-build must not
+# leave a billing-linked project with no guardrail.
+echo "==> Budget alert (\$1/month, 50% and 100% thresholds)"
+BUDGET_NOTE="Budget alert active: Billing Account Admins/Users are
+emailed at 50% and 100% of \$1/month."
+# Idempotency keys off the budget's project filter (the API stores
+# project NUMBERS), never the display name, which can drift. The
+# anchored match prevents a longer project number false-positiving.
+if ! gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
+  --format="value(budgetFilter.projects)" 2>/dev/null \
+  | grep -Eq "projects/${PROJECT_NUMBER}(\$|[^0-9])"; then
+  if ! gcloud billing budgets create \
+    --billing-account="$BILLING_ACCOUNT" \
+    --display-name="${SERVICE}-${PROJECT_ID}-guardrail" \
+    --budget-amount=1USD \
+    --threshold-rule=percent=0.5 \
+    --threshold-rule=percent=1.0 \
+    --filter-projects="projects/${PROJECT_ID}" >/dev/null 2>&1; then
+    BUDGET_NOTE="Could not create the budget (needs Billing Account
+Costs Manager). Create it manually — WITH alert thresholds, they are
+not added by default:
+  https://console.cloud.google.com/billing/budgets
+  (\$1/month scoped to project ${PROJECT_ID}, thresholds 50%/100%)"
+  fi
+fi
+
 echo "==> Deploying to Cloud Run (${REGION})"
 gcloud run deploy "$SERVICE" \
   --project "$PROJECT_ID" \
@@ -217,27 +262,26 @@ gcloud run deploy "$SERVICE" \
 URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" \
   --region "$REGION" --format="value(status.url)")
 
-echo "==> Budget alert (\$1/month, 50% and 100% thresholds)"
-BUDGET_NOTE="Budget alert active: Billing Account Admins/Users are
-emailed at 50% and 100% of \$1/month."
-# Idempotency keys off the budget's project filter (the API stores
-# project NUMBERS), never the display name, which can drift.
-if ! gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
-  --format="value(budgetFilter.projects)" 2>/dev/null \
-  | grep -q "projects/${PROJECT_NUMBER}"; then
-  if ! gcloud billing budgets create \
-    --billing-account="$BILLING_ACCOUNT" \
-    --display-name="${SERVICE}-${PROJECT_ID}-guardrail" \
-    --budget-amount=1USD \
-    --threshold-rule=percent=0.5 \
-    --threshold-rule=percent=1.0 \
-    --filter-projects="projects/${PROJECT_ID}" >/dev/null 2>&1; then
-    BUDGET_NOTE="Could not create the budget (needs Billing Account
-Costs Manager). Create it manually — WITH alert thresholds, they are
-not added by default:
-  https://console.cloud.google.com/billing/budgets
-  (\$1/month scoped to project ${PROJECT_ID}, thresholds 50%/100%)"
-  fi
+# Catch the org-policy failure class (Domain Restricted Sharing makes
+# --allow-unauthenticated a silent no-op: deploy "succeeds", endpoint
+# 403s for everyone). An unauthenticated probe must get the app's 401.
+echo "==> Post-deploy check (expecting 401 from the auth gate)"
+PROBE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${URL}/mcp" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  || echo "unreachable")
+if [[ "$PROBE" == "401" ]]; then
+  echo "    OK — endpoint up, bearer auth enforced."
+elif [[ "$PROBE" == "403" ]]; then
+  echo "    WARNING: got 403, not 401 — your organization likely" >&2
+  echo "    enforces Domain Restricted Sharing, which blocks" >&2
+  echo "    --allow-unauthenticated. Claude clients cannot reach" >&2
+  echo "    this endpoint until that org policy is relaxed for" >&2
+  echo "    project ${PROJECT_ID}." >&2
+else
+  echo "    WARNING: expected 401, got '${PROBE}' — check" >&2
+  echo "    'gcloud run services logs read ${SERVICE}'." >&2
 fi
 
 cat <<DONE

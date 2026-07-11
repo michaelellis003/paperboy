@@ -1,0 +1,11 @@
+# Explicit source-upload exclusions for `gcloud run deploy --source`.
+# Without this file, gcloud derives exclusions from .gitignore
+# implicitly — that works, but the property "credentials never leave
+# this machine" should be deliberate, not inherited.
+#!include:.gitignore
+.env
+.git/
+tests/
+docs/
+deploy/
+.pre-commit-config.yaml
