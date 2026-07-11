@@ -114,10 +114,23 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
 
 
 def find_item(paper: Paper) -> dict | None:
-    """Return the queue item matching this paper, if any."""
+    """Return the library item matching this paper, if any.
+
+    Checks the Reading Queue first (the common case), then falls back
+    to a library-wide search — items removed from the queue but kept
+    in topical collections must still deduplicate, or a re-send would
+    re-deliver and create a duplicate record.
+    """
     for item in _queue_items():
         if _matches(paper, item["data"]):
             return item
+    api = _api()
+    for query in (paper.doi, paper.arxiv_id, paper.title):
+        if not query:
+            continue
+        for item in api.items(q=query, qmode="everything", limit=25):
+            if _matches(paper, item.get("data", {})):
+                return item
     return None
 
 
@@ -159,6 +172,10 @@ def add_paper(
 
     existing = find_item(paper)
     if existing:
+        # An item previously removed from the queue (but kept in the
+        # library via topical collections) rejoins the queue instead of
+        # spawning a duplicate record.
+        _add_to_collection(existing, queue_key)
         for key in extra_keys:
             if key:
                 _add_to_collection(existing, key)
