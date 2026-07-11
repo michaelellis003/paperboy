@@ -99,26 +99,37 @@ If paperboy is added but half-configured, ask Claude "check my paperboy
 setup" — the `setup_status` tool reports what's missing and what to do,
 without ever passing secrets through the chat.
 
-## Remote deployment (Cloud Run)
+## Remote deployment (Cloud Run) — deploy your own
 
-When `PORT` is set (Cloud Run does this), paperboy serves Streamable HTTP at
-`/mcp` — which is what claude.ai custom connectors expect — and **requires**
-`MCP_AUTH_TOKEN`: it refuses to start unauthenticated, because the server can
-send email as you. Put every value from `.env.example` into Secret Manager /
-Cloud Run env vars.
+Every deployment is **single-tenant**: your instance, your secrets, your
+bearer token, your (almost certainly $0) bill. Nobody shares anyone's
+server. To run your own:
 
 ```bash
-python -c 'import secrets; print(secrets.token_urlsafe(32))'  # MCP_AUTH_TOKEN
-gcloud run deploy paperboy --source . --region us-central1 --allow-unauthenticated
+uv run paperboy setup          # collect credentials into .env
+gcloud auth login
+./deploy/deploy.sh my-paperboy-project
 ```
 
-(`--allow-unauthenticated` here means Cloud Run itself doesn't require a
-Google identity — the bearer token is what gates access. Keep it secret.)
+The script creates a dedicated GCP project, stores secrets in Secret
+Manager, runs the service under a least-privilege service account (its
+only permission is reading those secrets), and deploys with cost
+guardrails: `--max-instances=1`, scale-to-zero, and the `us-central1`
+free-tier region (2M requests/month — a personal server stays free).
+Finish with a $1 budget alert in the console for belt-and-braces.
 
-Then add it in claude.ai → Settings → Connectors → Add custom connector with
-the service URL + `/mcp`, supplying the token as the Authorization header
-(`Bearer <token>`). For OAuth instead of a static token, FastMCP ships
-provider integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth`.
+Security model: when `PORT` is set (Cloud Run does this), paperboy
+serves Streamable HTTP at `/mcp` and **requires** `MCP_AUTH_TOKEN` — it
+refuses to start unauthenticated, because the server can send email as
+you. Requests without the token are rejected with 401 in microseconds,
+before any tool logic runs. Ingress is public because claude.ai
+connectors cannot send Google IAM tokens; the bearer token is the gate.
+For OAuth instead of a static token, FastMCP ships provider
+integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth`.
+
+Then add it in claude.ai → Settings → Connectors → Add custom connector
+with the service URL + `/mcp`, supplying the token as the Authorization
+header (`Bearer <token>`).
 
 ## Roadmap
 
