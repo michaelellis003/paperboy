@@ -11,6 +11,8 @@ the e-reader is worse than a lookup failure.
 import difflib
 import re
 
+import httpx
+
 from . import arxiv, doi, openalex
 from .models import Paper
 from .net import client
@@ -27,10 +29,21 @@ def _resolve_title(ref: str) -> Paper | None:
     matches = openalex.search(ref, max_results=1)
     if not matches:
         return None
+    hit = matches[0]
     ratio = difflib.SequenceMatcher(
-        None, _normalize(ref), _normalize(matches[0].title)
+        None, _normalize(ref), _normalize(hit.title)
     ).ratio()
-    return matches[0] if ratio >= _TITLE_MATCH_THRESHOLD else None
+    if ratio < _TITLE_MATCH_THRESHOLD:
+        return None
+    # OpenAlex carries junk duplicate records (wrong DOI/date) for some
+    # papers; when the hit is on arXiv, re-fetch canonical metadata so
+    # the library record and dedup keys are authoritative.
+    if hit.arxiv_id:
+        try:
+            return arxiv.get_paper(hit.arxiv_id)
+        except (ValueError, httpx.HTTPError):
+            pass
+    return hit
 
 
 def resolve(ref: str) -> Paper:
@@ -54,10 +67,49 @@ def resolve(ref: str) -> Paper:
     )
 
 
+def _candidate_pdf_urls(paper: Paper) -> list[str]:
+    """PDF URLs to try, most reliable last-resort being arXiv itself."""
+    urls = [paper.pdf_url] if paper.pdf_url else []
+    if paper.arxiv_id:
+        fallback = f"https://arxiv.org/pdf/{paper.arxiv_id}"
+        if fallback not in urls:
+            urls.append(fallback)
+    return urls
+
+
 def download_pdf(paper: Paper) -> bytes:
-    """Download the paper's PDF; raises when no OA PDF is available."""
-    if not paper.pdf_url:
+    """Download the paper's PDF, falling back to arXiv on dead links.
+
+    Raises ValueError with the underlying cause when no candidate URL
+    works.
+    """
+    urls = _candidate_pdf_urls(paper)
+    if not urls:
         raise ValueError(f"No open-access PDF available for: {paper.title}")
-    response = client.get(paper.pdf_url)
-    response.raise_for_status()
-    return response.content
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPError as exc:
+            last_error = exc
+    raise ValueError(
+        f"Could not download PDF for {paper.title!r}: {last_error}"
+    )
+
+
+def probe_pdf_size(paper: Paper) -> int | None:
+    """Best-effort PDF size in bytes via a HEAD request.
+
+    Returns None when the server does not say.
+    """
+    for url in _candidate_pdf_urls(paper):
+        try:
+            response = client.head(url)
+            length = response.headers.get("content-length")
+            if response.status_code == 200 and length:
+                return int(length)
+        except httpx.HTTPError:
+            continue
+    return None

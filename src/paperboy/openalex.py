@@ -50,6 +50,15 @@ def _parse_work(work: dict) -> Paper:
     best_oa = work.get("best_oa_location") or {}
     primary = work.get("primary_location") or {}
     url = doi_url or primary.get("landing_page_url") or work.get("id", "")
+    arxiv_id = _arxiv_id(work)
+    # arXiv's own PDF endpoint is far more reliable than whatever OA
+    # mirror OpenAlex ranked "best" — prefer it whenever the paper is
+    # on arXiv.
+    pdf_url = (
+        f"https://arxiv.org/pdf/{arxiv_id}"
+        if arxiv_id
+        else best_oa.get("pdf_url")
+    )
     return Paper(
         title=work.get("display_name") or "(untitled)",
         authors=[
@@ -62,8 +71,8 @@ def _parse_work(work: dict) -> Paper:
         ),
         published=work.get("publication_date") or "",
         url=url,
-        pdf_url=best_oa.get("pdf_url"),
-        arxiv_id=_arxiv_id(work),
+        pdf_url=pdf_url,
+        arxiv_id=arxiv_id,
         doi=doi,
     )
 

@@ -10,6 +10,7 @@ class FakeZotero:
             {"key": "COLL", "data": {"name": "Reading Queue"}}
         ]
         self.created = []
+        self.deleted = []
         self.tagged = []
         self.fail_create = False
 
@@ -35,10 +36,17 @@ class FakeZotero:
         return {"failed": {}, "successful": {"0": {"key": "NEWITEM"}}}
 
     def item(self, key):
+        for item in self.items:
+            if item["key"] == key:
+                return item
         return {"key": key, "data": {}}
 
     def add_tags(self, item, tag):
         self.tagged.append((item["key"], tag))
+
+    def delete_item(self, item):
+        self.deleted.append(item["key"])
+        self.items = [i for i in self.items if i["key"] != item["key"]]
 
 
 @pytest.fixture
@@ -49,8 +57,8 @@ def fake_api(env, monkeypatch):
 
 
 def test_add_arxiv_paper_creates_preprint(fake_api, paper_factory):
-    key = zotero_client.add_paper(paper_factory())
-    assert key == "NEWITEM"
+    key, created = zotero_client.add_paper(paper_factory())
+    assert (key, created) == ("NEWITEM", True)
     item = fake_api.created[0]
     assert item["itemType"] == "preprint"
     assert item["archiveID"] == "arXiv:2401.12345"
@@ -72,7 +80,7 @@ def test_add_paper_dedups_on_arxiv_url(fake_api, paper_factory):
             "data": {"url": "https://arxiv.org/abs/2401.12345"},
         }
     ]
-    assert zotero_client.add_paper(paper_factory()) == "EXISTING"
+    assert zotero_client.add_paper(paper_factory()) == ("EXISTING", False)
     assert fake_api.created == []
 
 
@@ -81,7 +89,7 @@ def test_add_paper_dedups_on_doi_case_insensitive(fake_api, paper_factory):
         {"key": "EXISTING", "data": {"DOI": "10.1038/NATURE12373"}}
     ]
     paper = paper_factory(arxiv_id=None, doi="10.1038/nature12373")
-    assert zotero_client.add_paper(paper) == "EXISTING"
+    assert zotero_client.add_paper(paper) == ("EXISTING", False)
 
 
 def test_add_paper_rejected_by_zotero(fake_api, paper_factory):
@@ -90,19 +98,106 @@ def test_add_paper_rejected_by_zotero(fake_api, paper_factory):
         zotero_client.add_paper(paper_factory())
 
 
-def test_unsent_queue_items_filters_sent_tag(fake_api):
+def test_matches_on_archive_id(fake_api, paper_factory):
+    fake_api.items = [
+        {
+            "key": "K1",
+            "data": {
+                "url": "https://doi.org/10.65215/junk",
+                "archiveID": "arXiv:2401.12345",
+            },
+        }
+    ]
+    item = zotero_client.find_item(paper_factory())
+    assert item is not None and item["key"] == "K1"
+
+
+def test_find_item_and_is_sent(fake_api, paper_factory):
+    fake_api.items = [
+        {
+            "key": "K1",
+            "data": {
+                "url": "https://arxiv.org/abs/2401.12345",
+                "tags": [{"tag": "sent-to-ereader"}],
+            },
+        }
+    ]
+    item = zotero_client.find_item(paper_factory())
+    assert item is not None and item["key"] == "K1"
+    assert zotero_client.is_sent(item) is True
+    assert zotero_client.find_item(paper_factory(arxiv_id="9999.9")) is None
+
+
+def test_unsent_excludes_sent_and_no_pdf(fake_api):
     fake_api.items = [
         {"key": "A", "data": {"tags": [{"tag": "sent-to-ereader"}]}},
-        {"key": "B", "data": {"tags": [{"tag": "other"}]}},
+        {"key": "B", "data": {"tags": [{"tag": zotero_client.NO_PDF_TAG}]}},
         {"key": "C", "data": {}},
     ]
     keys = [item["key"] for item in zotero_client.unsent_queue_items()]
-    assert keys == ["B", "C"]
+    assert keys == ["C"]
 
 
-def test_mark_sent_tags_item(fake_api):
-    zotero_client.mark_sent("ITEM1")
-    assert fake_api.tagged == [("ITEM1", "sent-to-ereader")]
+def test_mark_sent_is_idempotent(fake_api):
+    fake_api.items = [
+        {"key": "A", "data": {"tags": [{"tag": "sent-to-ereader"}]}},
+        {"key": "B", "data": {"tags": []}},
+    ]
+    zotero_client.mark_sent("A")
+    zotero_client.mark_sent("B")
+    assert fake_api.tagged == [("B", "sent-to-ereader")]
+
+
+def test_mark_no_pdf(fake_api):
+    fake_api.items = [{"key": "A", "data": {"tags": []}}]
+    zotero_client.mark_no_pdf("A")
+    assert fake_api.tagged == [("A", zotero_client.NO_PDF_TAG)]
+
+
+def test_list_queue_statuses(fake_api):
+    fake_api.items = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Sent One",
+                "DOI": "10.1/a",
+                "tags": [{"tag": "sent-to-ereader"}],
+                "dateAdded": "2026-07-01T00:00:00Z",
+            },
+        },
+        {
+            "key": "B",
+            "data": {
+                "title": "Stuck One",
+                "url": "https://x",
+                "tags": [{"tag": zotero_client.NO_PDF_TAG}],
+            },
+        },
+        {"key": "C", "data": {"title": "Fresh One", "url": "https://y"}},
+    ]
+    entries = zotero_client.list_queue()
+    assert [(e["title"], e["status"]) for e in entries] == [
+        ("Sent One", "sent"),
+        ("Stuck One", "no-open-access-pdf"),
+        ("Fresh One", "unsent"),
+    ]
+    assert entries[0]["added"] == "2026-07-01"
+
+
+def test_remove_by_refs(fake_api):
+    fake_api.items = [
+        {"key": "A", "data": {"title": "Alpha", "DOI": "10.1/alpha"}},
+        {
+            "key": "B",
+            "data": {"title": "Beta", "url": "https://arxiv.org/abs/2401.1"},
+        },
+    ]
+    removed, misses = zotero_client.remove_by_refs(
+        ["10.1/alpha", "beta", "nonexistent"]
+    )
+    assert removed == ["Alpha", "Beta"]
+    assert misses == ["nonexistent"]
+    assert fake_api.deleted == ["A", "B"]
 
 
 def test_creates_missing_collection(fake_api, paper_factory):

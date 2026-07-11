@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from paperboy import arxiv, delivery, openalex, resolver, server, zotero_client
@@ -20,6 +21,23 @@ def no_download(monkeypatch):
     monkeypatch.setattr(resolver, "download_pdf", lambda paper: b"%PDF")
 
 
+@pytest.fixture
+def zotero_env(env, monkeypatch):
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    monkeypatch.setattr(zotero_client, "find_item", lambda p: None)
+    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
+    monkeypatch.setattr(zotero_client, "mark_sent", lambda k: None)
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", lambda k: None)
+    return env
+
+
+# --- search ----------------------------------------------------------------
+
+
 def test_search_papers_uses_openalex_by_default(
     env, monkeypatch, paper_factory
 ):
@@ -40,6 +58,22 @@ def test_search_papers_arxiv_source(env, monkeypatch, paper_factory):
     results = server.search_papers("attention", source="arxiv")
     assert results[0]["ref"] == "https://arxiv.org/abs/2401.12345"
     assert results[0]["open_access_pdf"] is False
+
+
+def test_search_trims_long_author_lists(env, monkeypatch, paper_factory):
+    paper = paper_factory(authors=[f"Author {i}" for i in range(9)])
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [paper])
+    result = server.search_papers("q")[0]
+    assert result["authors"] == ["Author 0", "Author 1", "Author 2", "et al."]
+
+
+def test_search_truncates_abstract(env, monkeypatch, paper_factory):
+    paper = paper_factory(abstract="x" * 1000)
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [paper])
+    assert len(server.search_papers("q")[0]["abstract"]) == 300
+
+
+# --- send_papers -----------------------------------------------------------
 
 
 def test_send_papers_sends_and_reports(
@@ -76,7 +110,21 @@ def test_send_papers_reports_unresolvable(
     monkeypatch.setattr(resolver, "resolve", fake_resolve)
     receipt = server.send_papers(["2401.12345", "gibberish"])
     assert len(sent_documents) == 1
-    assert "Could not resolve: gibberish" in receipt
+    assert "could not resolve: gibberish" in receipt
+
+
+def test_send_papers_distinguishes_network_errors(
+    env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    def fake_resolve(ref):
+        if ref == "flaky":
+            raise httpx.ReadTimeout("timed out")
+        return paper_factory()
+
+    monkeypatch.setattr(resolver, "resolve", fake_resolve)
+    receipt = server.send_papers(["2401.12345", "flaky"])
+    assert len(sent_documents) == 1
+    assert "temporarily unreachable" in receipt and "flaky" in receipt
 
 
 def test_send_papers_nothing_resolves(env, monkeypatch):
@@ -88,43 +136,170 @@ def test_send_papers_nothing_resolves(env, monkeypatch):
     assert receipt == "Nothing was sent. could not resolve: gibberish"
 
 
-def test_send_papers_records_in_zotero(
+def test_send_papers_dedupes_refs_in_call(
     env, monkeypatch, paper_factory, sent_documents, no_download
 ):
-    env.setenv("ZOTERO_API_KEY", "k")
-    env.setenv("ZOTERO_LIBRARY_ID", "1")
-    import paperboy.config
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    server.send_papers(["2401.12345", "arXiv:2401.12345", "2401.12345"])
+    assert len(sent_documents) == 1
 
-    env.setattr(paperboy.config, "_settings", None)
-    added, marked = [], []
+
+def test_send_papers_skips_already_sent(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(
-        zotero_client, "add_paper", lambda p: added.append(p) or "KEY"
+        zotero_client, "find_item", lambda p: {"key": "K", "data": {}}
     )
+    monkeypatch.setattr(zotero_client, "is_sent", lambda item: True)
+    receipt = server.send_papers(["2401.12345"])
+    assert sent_documents == []
+    assert "Already sent" in receipt or "already sent" in receipt
+    assert "force=True" in receipt
+
+
+def test_send_papers_force_resends(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client, "find_item", lambda p: {"key": "K", "data": {}}
+    )
+    monkeypatch.setattr(zotero_client, "is_sent", lambda item: True)
+    server.send_papers(["2401.12345"], force=True)
+    assert len(sent_documents) == 1
+
+
+def test_send_papers_survives_dead_pdf_link(
+    env, monkeypatch, paper_factory, sent_documents
+):
+    good = paper_factory()
+    dead = paper_factory(
+        title="Dead Link",
+        arxiv_id=None,
+        doi="10.1/dead",
+        pdf_url="https://mirror.invalid/x.pdf",
+    )
+    papers = iter([good, dead])
+    monkeypatch.setattr(resolver, "resolve", lambda ref: next(papers))
+
+    def fake_download(paper):
+        if paper.title == "Dead Link":
+            raise ValueError("Could not download PDF: 404")
+        return b"%PDF"
+
+    monkeypatch.setattr(resolver, "download_pdf", fake_download)
+    receipt = server.send_papers(["2401.12345", "10.1/dead"])
+    assert len(sent_documents) == 1
+    assert "download failed: Dead Link" in receipt
+
+
+def test_send_papers_records_in_zotero(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    added, marked = [], []
+
+    def fake_add(paper):
+        added.append(paper)
+        return "KEY", True
+
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(zotero_client, "add_paper", fake_add)
     monkeypatch.setattr(zotero_client, "mark_sent", marked.append)
     receipt = server.send_papers(["2401.12345"])
     assert added and marked == ["KEY"]
     assert "recorded in Zotero" in receipt
 
 
+def test_send_papers_dry_run(env, monkeypatch, paper_factory):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(resolver, "probe_pdf_size", lambda p: 2_500_000)
+    receipt = server.send_papers(["2401.12345"], dry_run=True)
+    assert "Would send 1 paper(s), ~2.5 MB" in receipt
+    assert "A Test Paper (2.5 MB)" in receipt
+
+
+def test_send_papers_dry_run_unknown_size(env, monkeypatch, paper_factory):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(resolver, "probe_pdf_size", lambda p: None)
+    receipt = server.send_papers(["2401.12345"], dry_run=True)
+    assert "size unknown" in receipt
+
+
+# --- chunking --------------------------------------------------------------
+
+
+def test_chunk_splits_on_attachment_count():
+    docs = [(f"p{i}.pdf", b"x") for i in range(26)]
+    batches = server._chunk(docs)
+    assert [len(b) for b in batches] == [25, 1]
+
+
+def test_chunk_splits_on_total_size():
+    docs = [
+        ("a.pdf", b"x" * 30_000_000),
+        ("b.pdf", b"x" * 30_000_000),
+    ]
+    batches = server._chunk(docs)
+    assert len(batches) == 2
+
+
+def test_deliver_reports_partial_failure(env, monkeypatch):
+    calls = []
+
+    def fake_send(batch):
+        calls.append(batch)
+        if len(calls) == 2:
+            raise delivery.DeliveryError("boom")
+        return "Sent batch"
+
+    monkeypatch.setattr(delivery, "send_documents", fake_send)
+    docs = [(f"p{i}.pdf", b"x" * 30_000_000) for i in range(2)]
+    receipt, delivered = server._deliver(docs)
+    assert "Sent batch" in receipt and "delivery failed: boom" in receipt
+    assert delivered == {"p0.pdf"}
+
+
+def test_partial_delivery_marks_only_sent_batch(
+    zotero_env, monkeypatch, paper_factory, no_download
+):
+    big = paper_factory(title="Big", arxiv_id="1111.1")
+    small = paper_factory(title="Small", arxiv_id="2222.2")
+    papers = iter([big, small])
+    monkeypatch.setattr(resolver, "resolve", lambda ref: next(papers))
+    monkeypatch.setattr(resolver, "download_pdf", lambda p: b"x" * 30_000_000)
+    calls = []
+
+    def fake_send(batch):
+        calls.append(batch)
+        if len(calls) == 2:
+            raise delivery.DeliveryError("smtp died")
+        return "Sent batch"
+
+    monkeypatch.setattr(delivery, "send_documents", fake_send)
+    marked = []
+    monkeypatch.setattr(zotero_client, "mark_sent", marked.append)
+    receipt = server.send_papers(["1111.1", "2222.2"])
+    assert marked == ["KEY"]  # only the delivered batch's paper
+    assert "delivery failed: smtp died" in receipt
+
+
+# --- queue_papers ----------------------------------------------------------
+
+
 def test_queue_papers(env, monkeypatch, paper_factory):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
-    monkeypatch.setattr(zotero_client, "add_paper", lambda p: "KEY")
+    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", True))
     receipt = server.queue_papers(["2401.12345"])
-    assert "Queued 1 paper(s) in 'Reading Queue'" in receipt
+    assert "Queued 1 new paper(s) in 'Reading Queue'" in receipt
 
 
-def test_queue_papers_reports_unresolvable(env, monkeypatch, paper_factory):
-    def fake_resolve(ref):
-        if ref == "gibberish":
-            raise ValueError("nope")
-        return paper_factory()
-
-    monkeypatch.setattr(resolver, "resolve", fake_resolve)
-    monkeypatch.setattr(zotero_client, "add_paper", lambda p: "KEY")
-    receipt = server.queue_papers(["2401.12345", "gibberish"])
-    assert "Queued 1 paper(s)" in receipt
-    assert "Could not resolve: gibberish" in receipt
+def test_queue_papers_reports_existing(env, monkeypatch, paper_factory):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(zotero_client, "add_paper", lambda p: ("KEY", False))
+    receipt = server.queue_papers(["2401.12345"])
+    assert "Queued 0 new paper(s)" in receipt
+    assert "already in queue: A Test Paper" in receipt
 
 
 def test_queue_papers_nothing_resolves(env, monkeypatch):
@@ -134,6 +309,27 @@ def test_queue_papers_nothing_resolves(env, monkeypatch):
     monkeypatch.setattr(resolver, "resolve", fail)
     receipt = server.queue_papers(["gibberish"])
     assert receipt.startswith("Nothing was queued")
+
+
+# --- list / remove ---------------------------------------------------------
+
+
+def test_list_queue_tool(env, monkeypatch):
+    entries = [{"title": "T", "ref": "10.1/x", "status": "unsent", "added": ""}]
+    monkeypatch.setattr(zotero_client, "list_queue", lambda: entries)
+    assert server.list_queue() == entries
+
+
+def test_remove_from_queue_tool(env, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client, "remove_by_refs", lambda refs: (["Paper A"], ["nope"])
+    )
+    receipt = server.remove_from_queue(["10.1/a", "nope"])
+    assert "Removed 1 item(s)" in receipt and "Paper A" in receipt
+    assert "Not found in queue: nope" in receipt
+
+
+# --- send_queue ------------------------------------------------------------
 
 
 def test_send_queue_empty(env, monkeypatch):
@@ -151,8 +347,9 @@ def test_send_queue_mixed_items(
         {"key": "PAYWALL", "data": {"title": "Paywalled", "DOI": "10.1/x"}},
     ]
     monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)
-    marked = []
+    marked, no_pdf_tagged = [], []
     monkeypatch.setattr(zotero_client, "mark_sent", marked.append)
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", no_pdf_tagged.append)
 
     def fake_resolve(ref):
         if ref == "junk":
@@ -164,9 +361,10 @@ def test_send_queue_mixed_items(
     monkeypatch.setattr(resolver, "resolve", fake_resolve)
     receipt = server.send_queue()
     assert marked == ["GOOD"]
+    assert no_pdf_tagged == ["PAYWALL"]
     assert "No Ref (no DOI or URL)" in receipt
     assert "Broken (unresolvable: junk)" in receipt
-    assert "Paywalled (no open-access PDF)" in receipt
+    assert "Paywalled (no open-access PDF — won't retry)" in receipt
 
 
 def test_send_queue_nothing_deliverable(env, monkeypatch):
@@ -174,6 +372,9 @@ def test_send_queue_nothing_deliverable(env, monkeypatch):
     monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)
     receipt = server.send_queue()
     assert receipt.startswith("Nothing in the queue is deliverable")
+
+
+# --- setup_status ----------------------------------------------------------
 
 
 def test_setup_status_unconfigured(monkeypatch):
@@ -195,6 +396,9 @@ def test_setup_status_email_ready(env):
     assert status["delivery_ready"] is True
     assert status["email_backend_configured"] is True
     assert status["dropbox_backend_configured"] is False
+
+
+# --- auth ------------------------------------------------------------------
 
 
 def test_bearer_auth_requires_token(monkeypatch):

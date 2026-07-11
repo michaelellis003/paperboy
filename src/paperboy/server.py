@@ -8,6 +8,7 @@ sets PORT, which switches on the HTTP transport automatically.
 import os
 import sys
 
+import httpx
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
@@ -19,23 +20,27 @@ mcp = FastMCP(
     "paperboy",
     instructions=(
         "Delivers research papers to the user's e-reader (Kindle, Kobo, "
-        "PocketBook, ...) and manages their Zotero reading queue. Prefer "
-        "queue_papers + send_queue so state lives in Zotero; use "
-        "send_papers for one-off sends. Papers are referenced by arXiv "
-        "id, DOI, URL, or title — so a reading list from research can "
-        "be sent directly. Always relay delivery receipts, including "
-        "papers that could not be resolved or sent, back to the user."
+        "PocketBook, ...) and organizes them in a Zotero reading queue. "
+        "Papers are referenced by arXiv id, DOI, URL, or title — so a "
+        "reading list from research can be sent directly. Use "
+        "send_papers when the user picks specific papers; send_queue "
+        "flushes EVERY unsent queued item, so check list_queue first. "
+        "Always relay delivery receipts — including sizes, skipped "
+        "papers, and failures — back to the user."
     ),
 )
 
 
 def _summary(paper: Paper) -> dict:
+    authors = paper.authors[:3]
+    if len(paper.authors) > 3:
+        authors = [*authors, "et al."]
     return {
         "ref": paper.doi or paper.arxiv_id or paper.url,
         "title": paper.title,
-        "authors": paper.authors,
+        "authors": authors,
         "published": paper.published,
-        "abstract": paper.abstract[:500],
+        "abstract": paper.abstract[:300],
         "open_access_pdf": bool(paper.pdf_url),
     }
 
@@ -47,10 +52,12 @@ def search_papers(
     """Search for papers across the scholarly literature.
 
     ``source`` is 'all' (OpenAlex: journals, conferences, and preprint
-    servers including arXiv) or 'arxiv' (arXiv's own search, better for
-    very recent preprints). Each result includes a ``ref`` (DOI or
-    arXiv id) that can be passed to send_papers / queue_papers, and
-    ``open_access_pdf`` indicating whether it can be delivered.
+    servers including arXiv — usually the better ranking, even for
+    arXiv-native topics) or 'arxiv' (arXiv's own search; only better
+    for very recent preprints). Each result has a ``ref`` (DOI or arXiv
+    id) to pass to send_papers / queue_papers. ``open_access_pdf``
+    means an OA PDF link was found; delivery can still fail if the
+    link is dead (arXiv-hosted papers are the most reliable).
     """
     if source == "arxiv":
         papers = arxiv.search(query, max_results=max_results)
@@ -60,55 +67,182 @@ def search_papers(
 
 
 def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
-    """Resolve each ref independently; failures never block the rest."""
-    resolved, unresolved = [], []
+    """Resolve refs independently, deduplicating within the call.
+
+    Returns (papers, problems) where problems are human-readable
+    strings distinguishing bad refs from transient network failures.
+    """
+    resolved: list[Paper] = []
+    seen: set[str] = set()
+    problems: list[str] = []
     for ref in refs:
         try:
-            resolved.append(resolver.resolve(ref))
+            paper = resolver.resolve(ref)
         except ValueError:
-            unresolved.append(ref)
-    return resolved, unresolved
+            problems.append(f"could not resolve: {ref}")
+            continue
+        except httpx.HTTPError as exc:
+            problems.append(
+                f"temporarily unreachable ({type(exc).__name__}): {ref} — retry"
+            )
+            continue
+        key = paper.doi or paper.arxiv_id or paper.title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(paper)
+    return resolved, problems
+
+
+def _download_all(
+    papers: list[Paper],
+) -> tuple[list[tuple[Paper, bytes]], list[str]]:
+    """Download PDFs one by one; a dead link never blocks the batch."""
+    downloaded, failures = [], []
+    for paper in papers:
+        try:
+            downloaded.append((paper, resolver.download_pdf(paper)))
+        except (ValueError, httpx.HTTPError) as exc:
+            failures.append(f"download failed: {paper.title} ({exc})")
+    return downloaded, failures
+
+
+def _chunk(
+    documents: list[tuple[str, bytes]],
+) -> list[list[tuple[str, bytes]]]:
+    """Split documents into batches within email limits."""
+    batches: list[list[tuple[str, bytes]]] = []
+    current: list[tuple[str, bytes]] = []
+    size = 0
+    for name, content in documents:
+        if current and (
+            len(current) >= delivery.MAX_ATTACHMENTS
+            or size + len(content) > delivery.MAX_TOTAL_BYTES
+        ):
+            batches.append(current)
+            current, size = [], 0
+        current.append((name, content))
+        size += len(content)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _deliver(documents: list[tuple[str, bytes]]) -> tuple[str, set[str]]:
+    """Send documents, auto-splitting into limit-sized batches.
+
+    Returns (receipt, delivered filenames) — a failed batch never
+    hides the batches that did go out, so callers can mark exactly
+    what was sent and never re-ship it.
+    """
+    receipts: list[str] = []
+    delivered: set[str] = set()
+    for batch in _chunk(documents):
+        try:
+            receipts.append(delivery.send_documents(batch))
+            delivered.update(name for name, _ in batch)
+        except delivery.DeliveryError as exc:
+            receipts.append(f"delivery failed: {exc}")
+    if len(receipts) > 1:
+        return " || ".join(receipts), delivered
+    return receipts[0], delivered
 
 
 @mcp.tool
-def send_papers(papers: list[str]) -> str:
-    """Send papers straight to the e-reader.
+def send_papers(
+    papers: list[str], force: bool = False, dry_run: bool = False
+) -> str:
+    """Send papers to the e-reader by arXiv id, DOI, URL, or title.
 
-    Accepts arXiv ids ('2401.12345', 'arXiv:...'), abs/pdf URLs, DOIs
-    like '10.1038/...', doi.org URLs, and paper titles (matched via
-    OpenAlex; near-exact titles work best). Unresolvable papers and
-    papers without an open-access PDF are reported back instead of
-    sent — relay those to the user. If Zotero is configured, each sent
-    paper is also added to the Reading Queue and tagged as sent, so
-    the library stays the source of truth.
+    Refs are deduplicated, and papers already tagged as sent in Zotero
+    are skipped unless force=True. Large batches are split
+    automatically to fit the 25-attachment / 50 MB per-email limits.
+    dry_run=True previews what would be sent, with estimated sizes,
+    without downloading or delivering — use it before big sends.
+
+    Papers without an open-access PDF are not sent; if Zotero is
+    configured they are still queued (tagged no-oa-pdf) so they can be
+    delivered manually later. Relay the full receipt — sizes, skips,
+    and failures — to the user.
     """
-    resolved, unresolved = _resolve_all(papers)
+    resolved, problems = _resolve_all(papers)
+
+    already_sent: list[Paper] = []
+    if settings().zotero_enabled and not force:
+        remaining = []
+        for paper in resolved:
+            item = zotero_client.find_item(paper)
+            if item is not None and zotero_client.is_sent(item):
+                already_sent.append(paper)
+            else:
+                remaining.append(paper)
+        resolved = remaining
+
     sendable = [paper for paper in resolved if paper.pdf_url]
     no_pdf = [paper for paper in resolved if not paper.pdf_url]
 
-    if not sendable:
-        problems = [f"no open-access PDF: {p.title}" for p in no_pdf] + [
-            f"could not resolve: {ref}" for ref in unresolved
+    if dry_run:
+        lines = []
+        total = 0.0
+        for paper in sendable:
+            size = resolver.probe_pdf_size(paper)
+            mb = f"{size / 1e6:.1f} MB" if size else "size unknown"
+            total += (size or 0) / 1e6
+            lines.append(f"{paper.title} ({mb})")
+        parts = [
+            f"Would send {len(sendable)} paper(s), ~{total:.1f} MB: "
+            + "; ".join(lines)
+            if lines
+            else "Nothing would be sent."
         ]
-        return "Nothing was sent. " + "; ".join(problems)
+        if no_pdf:
+            parts.append(
+                "no open-access PDF: " + "; ".join(p.title for p in no_pdf)
+            )
+        if already_sent:
+            parts.append(
+                "already sent (use force=True to resend): "
+                + "; ".join(p.title for p in already_sent)
+            )
+        parts.extend(problems)
+        return " | ".join(parts)
+
+    downloaded, failures = _download_all(sendable)
+    problems.extend(failures)
+
+    if not downloaded:
+        skips = [f"no open-access PDF: {p.title}" for p in no_pdf] + [
+            f"already sent (use force=True to resend): {p.title}"
+            for p in already_sent
+        ]
+        return "Nothing was sent. " + "; ".join(skips + problems)
 
     documents = [
-        (paper.safe_filename, resolver.download_pdf(paper))
-        for paper in sendable
+        (paper.safe_filename, content) for paper, content in downloaded
     ]
-    receipt = delivery.send_documents(documents)
+    receipt, delivered = _deliver(documents)
 
     if settings().zotero_enabled:
         for paper in resolved:
-            item_key = zotero_client.add_paper(paper)
-            if paper.pdf_url:
+            item_key, _ = zotero_client.add_paper(paper)
+            if paper.safe_filename in delivered:
                 zotero_client.mark_sent(item_key)
+            elif not paper.pdf_url:
+                zotero_client.mark_no_pdf(item_key)
         receipt += " (recorded in Zotero Reading Queue)"
     if no_pdf:
         titles = "; ".join(paper.title for paper in no_pdf)
-        receipt += f" | No open-access PDF, not sent: {titles}"
-    if unresolved:
-        receipt += f" | Could not resolve: {'; '.join(unresolved)}"
+        note = (
+            "No open-access PDF, queued unsent"
+            if settings().zotero_enabled
+            else "No open-access PDF, not sent"
+        )
+        receipt += f" | {note}: {titles}"
+    if already_sent:
+        titles = "; ".join(paper.title for paper in already_sent)
+        receipt += f" | Already sent, skipped (force=True to resend): {titles}"
+    if problems:
+        receipt += f" | Problems: {'; '.join(problems)}"
     return receipt
 
 
@@ -116,20 +250,107 @@ def send_papers(papers: list[str]) -> str:
 def queue_papers(papers: list[str]) -> str:
     """Add papers to the Zotero Reading Queue without sending them.
 
-    Accepts arXiv ids, DOIs, URLs, or paper titles. Deduplicates
-    against the existing queue. Unresolvable papers are reported back
-    — relay those to the user.
+    Accepts arXiv ids, DOIs, URLs, or paper titles. Papers already in
+    the queue are reported as such, not re-added. Unresolvable papers
+    are reported back — relay those to the user.
     """
-    resolved, unresolved = _resolve_all(papers)
+    resolved, problems = _resolve_all(papers)
+    new, existing = [], []
     for paper in resolved:
-        zotero_client.add_paper(paper)
+        _, created = zotero_client.add_paper(paper)
+        (new if created else existing).append(paper.title)
     if not resolved:
-        return "Nothing was queued. Could not resolve: " + "; ".join(unresolved)
-    titles = "; ".join(paper.title for paper in resolved)
+        return "Nothing was queued. " + "; ".join(problems)
     queue = settings().reading_queue_collection
-    receipt = f"Queued {len(resolved)} paper(s) in '{queue}': {titles}"
-    if unresolved:
-        receipt += f" | Could not resolve: {'; '.join(unresolved)}"
+    parts = [f"Queued {len(new)} new paper(s) in '{queue}'"]
+    if new:
+        parts[0] += ": " + "; ".join(new)
+    if existing:
+        parts.append(f"already in queue: {'; '.join(existing)}")
+    if problems:
+        parts.append("; ".join(problems))
+    return " | ".join(parts)
+
+
+@mcp.tool
+def list_queue() -> list[dict]:
+    """List the Zotero Reading Queue with delivery status per item.
+
+    Status is 'unsent', 'sent', or 'no-open-access-pdf'. Use this to
+    show the user their queue, before send_queue (which flushes every
+    unsent item), or to find refs for remove_from_queue.
+    """
+    return zotero_client.list_queue()
+
+
+@mcp.tool
+def remove_from_queue(refs: list[str]) -> str:
+    """Remove papers from the Zotero Reading Queue by ref or title.
+
+    Matches each ref (arXiv id, DOI, URL, or exact title) against
+    queue items and deletes matches from the library. This does not
+    delete anything from the e-reader.
+    """
+    removed, misses = zotero_client.remove_by_refs(refs)
+    receipt = f"Removed {len(removed)} item(s) from the queue"
+    if removed:
+        receipt += ": " + "; ".join(removed)
+    if misses:
+        receipt += f" | Not found in queue: {'; '.join(misses)}"
+    return receipt
+
+
+@mcp.tool
+def send_queue() -> str:
+    """Send EVERY unsent paper in the Zotero Reading Queue.
+
+    This flushes the whole queue — for specific papers use
+    send_papers. Items tagged sent or no-oa-pdf are skipped; items
+    whose PDF turns out to be unavailable are tagged no-oa-pdf so they
+    are not retried forever. Batches are split under the email limits
+    automatically. Check list_queue first when unsure what will go.
+    """
+    items = zotero_client.unsent_queue_items()
+    if not items:
+        return "Reading Queue is empty (or everything was already sent)."
+
+    downloaded, skipped = [], []
+    for item in items:
+        data = item["data"]
+        title = data.get("title", item["key"])
+        ref = data.get("DOI") or data.get("url") or ""
+        if not ref:
+            skipped.append(f"{title} (no DOI or URL)")
+            continue
+        try:
+            paper = resolver.resolve(ref)
+        except (ValueError, httpx.HTTPError):
+            skipped.append(f"{title} (unresolvable: {ref})")
+            continue
+        if not paper.pdf_url:
+            zotero_client.mark_no_pdf(item["key"])
+            skipped.append(f"{title} (no open-access PDF — won't retry)")
+            continue
+        try:
+            content = resolver.download_pdf(paper)
+        except (ValueError, httpx.HTTPError):
+            zotero_client.mark_no_pdf(item["key"])
+            skipped.append(f"{title} (PDF download failed — won't retry)")
+            continue
+        downloaded.append((item["key"], paper.safe_filename, content))
+
+    if not downloaded:
+        return "Nothing in the queue is deliverable. Skipped: " + "; ".join(
+            skipped
+        )
+
+    documents = [(name, content) for _, name, content in downloaded]
+    receipt, delivered = _deliver(documents)
+    for item_key, name, _ in downloaded:
+        if name in delivered:
+            zotero_client.mark_sent(item_key)
+    if skipped:
+        receipt += f" | Skipped: {'; '.join(skipped)}"
     return receipt
 
 
@@ -182,49 +403,6 @@ def setup_status() -> dict:
         "zotero_configured": cfg.zotero_enabled,
         "next_steps": next_steps,
     }
-
-
-@mcp.tool
-def send_queue() -> str:
-    """Send every unsent paper in the Zotero Reading Queue to the e-reader.
-
-    Items already tagged as sent are skipped. Items resolve via their
-    DOI or URL; items with neither, or with no open-access PDF, are
-    reported back for manual handling.
-    """
-    items = zotero_client.unsent_queue_items()
-    if not items:
-        return "Reading Queue is empty (or everything was already sent)."
-
-    documents, sendable, skipped = [], [], []
-    for item in items:
-        data = item["data"]
-        title = data.get("title", item["key"])
-        ref = data.get("DOI") or data.get("url") or ""
-        if not ref:
-            skipped.append(f"{title} (no DOI or URL)")
-            continue
-        try:
-            paper = resolver.resolve(ref)
-        except ValueError:
-            skipped.append(f"{title} (unresolvable: {ref})")
-            continue
-        if not paper.pdf_url:
-            skipped.append(f"{title} (no open-access PDF)")
-            continue
-        documents.append((paper.safe_filename, resolver.download_pdf(paper)))
-        sendable.append(item["key"])
-
-    if not documents:
-        skipped_titles = "; ".join(skipped)
-        return f"Nothing in the queue is deliverable. Skipped: {skipped_titles}"
-
-    receipt = delivery.send_documents(documents)
-    for item_key in sendable:
-        zotero_client.mark_sent(item_key)
-    if skipped:
-        receipt += f" | Skipped: {'; '.join(skipped)}"
-    return receipt
 
 
 def _bearer_auth() -> StaticTokenVerifier:

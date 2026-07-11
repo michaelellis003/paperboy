@@ -70,9 +70,20 @@ def test_too_many_attachments(env):
         delivery.send_documents(docs)
 
 
-def test_too_large(env):
-    docs = [("big.pdf", b"x" * (delivery.MAX_TOTAL_BYTES + 1))]
-    with pytest.raises(delivery.DeliveryError, match="50 MB"):
+def test_too_large_batch(env):
+    docs = [
+        ("a.pdf", b"x" * (delivery.MAX_TOTAL_BYTES // 2 + 1)),
+        ("b.pdf", b"x" * (delivery.MAX_TOTAL_BYTES // 2 + 1)),
+    ]
+    with pytest.raises(delivery.DeliveryError, match="Split into multiple"):
+        delivery.send_documents(docs)
+
+
+def test_single_oversize_file_gets_clear_message(env):
+    docs = [("huge.pdf", b"x" * (delivery.MAX_TOTAL_BYTES + 1))]
+    with pytest.raises(
+        delivery.DeliveryError, match="too large for email delivery"
+    ):
         delivery.send_documents(docs)
 
 
@@ -124,12 +135,27 @@ def _dropbox_client(uploads, token_status=200, upload_status=200):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def test_email_receipt_reports_sizes(env, monkeypatch):
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
+    receipt = delivery.send_documents([("big.pdf", b"x" * 2_000_000)])
+    assert "2.0 MB total" in receipt
+    assert "big.pdf (2.0 MB)" in receipt
+
+
 def test_dropbox_upload(dropbox_env, monkeypatch):
     uploads = []
     monkeypatch.setattr(delivery, "client", _dropbox_client(uploads))
     receipt = delivery.send_documents([DOC])
     assert uploads == ["/Books/paper.pdf"]
     assert "Dropbox folder '/Books'" in receipt
+    assert "MB total" in receipt and "overwritten" in receipt
+
+
+def test_dropbox_rejects_oversize_batch(dropbox_env, monkeypatch):
+    monkeypatch.setattr(delivery, "client", _dropbox_client([]))
+    docs = [("big.pdf", b"x" * (delivery.MAX_TOTAL_BYTES + 1))]
+    with pytest.raises(delivery.DeliveryError, match="per-batch cap"):
+        delivery.send_documents(docs)
 
 
 def test_dropbox_missing_config(dropbox_env):

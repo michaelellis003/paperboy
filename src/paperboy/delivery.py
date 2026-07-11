@@ -40,6 +40,13 @@ class DeliveryError(Exception):
     """Raised when documents cannot be delivered to the device."""
 
 
+def _manifest(documents: list[tuple[str, bytes]]) -> str:
+    """Per-file listing with sizes, for receipts."""
+    return ", ".join(
+        f"{name} ({len(content) / 1e6:.1f} MB)" for name, content in documents
+    )
+
+
 def send_documents(documents: list[tuple[str, bytes]]) -> str:
     """Deliver documents to the configured e-reader.
 
@@ -86,6 +93,11 @@ def _send_email(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
         )
     total = sum(len(content) for _, content in documents)
     if total > MAX_TOTAL_BYTES:
+        if len(documents) == 1:
+            raise DeliveryError(
+                f"{documents[0][0]} is {total / 1e6:.1f} MB, over the "
+                "50 MB per-email limit — too large for email delivery."
+            )
         raise DeliveryError(
             f"Attachments total {total / 1e6:.1f} MB, over the 50 MB "
             "per-email limit. Split into multiple sends."
@@ -119,8 +131,10 @@ def _send_email(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
     finally:
         smtp.quit()
 
-    names = ", ".join(name for name, _ in documents)
-    return f"Sent {len(documents)} document(s) to {cfg.device_email}: {names}"
+    return (
+        f"Sent {len(documents)} document(s), {total / 1e6:.1f} MB total, "
+        f"to {cfg.device_email}: {_manifest(documents)}"
+    )
 
 
 def _dropbox_access_token(cfg: Settings) -> str:
@@ -146,6 +160,13 @@ def _send_dropbox(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
         cfg,
         ["DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN"],
     )
+    total = sum(len(content) for _, content in documents)
+    if total > MAX_TOTAL_BYTES:
+        raise DeliveryError(
+            f"Batch totals {total / 1e6:.1f} MB, over the "
+            f"{MAX_TOTAL_BYTES / 1e6:.0f} MB per-batch cap. "
+            "Split into multiple sends."
+        )
     token = _dropbox_access_token(cfg)
     folder = cfg.dropbox_folder.rstrip("/")
     for filename, content in documents:
@@ -167,8 +188,8 @@ def _send_dropbox(cfg: Settings, documents: list[tuple[str, bytes]]) -> str:
                 f"({response.status_code}): {response.text[:200]}"
             )
 
-    names = ", ".join(name for name, _ in documents)
     return (
-        f"Uploaded {len(documents)} document(s) to Dropbox folder "
-        f"'{folder}': {names}"
+        f"Uploaded {len(documents)} document(s), {total / 1e6:.1f} MB total, "
+        f"to Dropbox folder '{folder}' (same-name files are overwritten): "
+        f"{_manifest(documents)}"
     )
