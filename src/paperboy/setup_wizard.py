@@ -215,7 +215,8 @@ def _setup_dropbox(folder: str, full_access: bool) -> dict[str, str]:
     access = "Full Dropbox" if full_access else "App folder"
     print(f"  1. Scoped access -> {access} -> pick any unique name")
     print("  2. Permissions tab: check files.content.write, click Submit")
-    print("     (do this BEFORE the next step — scopes freeze into tokens)")
+    print("     (do this before step 3; permissions are fixed into the")
+    print("     token at authorization time)")
     print("  3. Settings tab: copy the App key and App secret")
     app_key = _ask("App key")
     app_secret = _ask_secret("App secret")
@@ -295,7 +296,7 @@ def run(argv: list[str] | None = None) -> None:
     try:
         _run(argv)
     except (KeyboardInterrupt, EOFError):
-        print("\nSetup aborted — nothing was written.")
+        print("\nSetup aborted. Nothing was written.")
 
 
 def _run(argv: list[str] | None = None) -> None:

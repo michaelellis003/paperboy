@@ -263,8 +263,8 @@ fi
 # Budget BEFORE the deploy: a first run that dies mid-build must not
 # leave a billing-linked project with no guardrail.
 echo "==> Budget alert (\$1/month, 50% and 100% thresholds)"
-BUDGET_NOTE="Budget alert active: Billing Account Admins/Users are
-emailed at 50% and 100% of \$1/month."
+BUDGET_NOTE="Budget alert active: billing account admins are emailed
+at 50% and 100% of \$1/month."
 # Idempotency keys off the budget's project filter (the API stores
 # project NUMBERS), never the display name, which can drift. The
 # anchored match prevents a longer project number false-positiving.
@@ -354,6 +354,6 @@ Connect a client:
 
 Cost guardrails in place: max 1 instance, scales to zero when idle,
 free-tier region (the free tier is shared across your billing
-account). Note: the budget EMAILS you at 50%/100% — it does not cap
+account). The budget emails you at 50% and 100%; it does not cap
 billing. ${BUDGET_NOTE}
 DONE
