@@ -73,6 +73,10 @@ library ID lookup, full Dropbox OAuth exchange.
 uv sync && uv run paperboy setup
 ```
 
+[docs/setup.md](docs/setup.md) is the step-by-step version: where to
+find each credential in Zotero, Amazon, Gmail, and Dropbox, with links
+to the official page for every step.
+
 How much setup you need depends on the device:
 
 | You have | Credentials needed |
