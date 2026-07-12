@@ -60,12 +60,18 @@ accounts can only authenticate custom connectors through OAuth. Four
 variables in `.env` switch that on; the bearer token keeps working
 alongside it.
 
-1. In the Google Cloud console for your paperboy project, open
-   **APIs & Services > OAuth consent screen**. Choose External, fill
-   in the app name and your email, and add yourself as a test user.
-2. Under **APIs & Services > Credentials**, create an OAuth client ID
-   of type Web application. Add an authorized redirect URI of
-   `<your service URL>/auth/callback` (no `/mcp`), for example
+Google has no API for external OAuth consent screens, so steps 1–2
+are one-time console clicks (`deploy.sh` prints these same steps with
+your project's exact URLs and redirect URI filled in):
+
+1. Open `https://console.cloud.google.com/auth/overview?project=<your
+   project id>`. Choose External, fill in the app name and your email,
+   and add yourself as a test user.
+2. Create an OAuth client at `https://console.cloud.google.com/auth/
+   clients/create?project=<your project id>`: type Web application,
+   with an authorized redirect URI of exactly
+   `<your service URL>/auth/callback` (no `/mcp`, no trailing slash),
+   for example
    `https://paperboy-xxxx.us-central1.run.app/auth/callback`.
 3. Add to `.env`:
 

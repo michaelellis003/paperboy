@@ -334,6 +334,30 @@ else
   echo "    'gcloud run services logs read ${SERVICE}'." >&2
 fi
 
+if [[ -n "${GOOGLE_OAUTH_CLIENT_ID:-}" ]]; then
+  CLAUDE_AI_NOTE="claude.ai / mobile: add a custom connector with URL
+    ${URL}/mcp and the OAuth fields left empty. Claude discovers the
+    sign-in flow from the server; only OAUTH_ALLOWED_EMAILS can get in."
+else
+  CLAUDE_AI_NOTE="claude.ai / mobile: needs Google OAuth (their
+    connector dialog cannot send bearer tokens on most accounts).
+    Google has no API for this, so it is a one-time console task —
+    but every value you need is below:
+
+    1. Consent screen (once per project):
+       https://console.cloud.google.com/auth/overview?project=${PROJECT_ID}
+       External, add yourself as a test user.
+    2. Create an OAuth client (type: Web application):
+       https://console.cloud.google.com/auth/clients/create?project=${PROJECT_ID}
+       Authorized redirect URI (exactly):
+       ${URL}/auth/callback
+    3. Add to .env, then re-run this script:
+       GOOGLE_OAUTH_CLIENT_ID=<from step 2>
+       GOOGLE_OAUTH_CLIENT_SECRET=<from step 2>
+       SERVER_BASE_URL=${URL}
+       OAUTH_ALLOWED_EMAILS=<your google account email>"
+fi
+
 cat <<DONE
 
 ==> Deployed.
@@ -347,11 +371,7 @@ Connect a client:
       --header "Authorization: Bearer <your MCP_AUTH_TOKEN>"
   Claude API: pass the token as authorization_token on the MCP
     connector.
-  claude.ai / mobile: add a custom connector with URL ${URL}/mcp and
-    the OAuth fields left empty (requires the Google OAuth variables
-    in .env — see docs/deploy.md). If your Add-connector dialog has
-    the beta "Request headers" section instead, the bearer header
-    works there too.
+  ${CLAUDE_AI_NOTE}
 
 Cost guardrails in place: max 1 instance, scales to zero when idle,
 free-tier region (the free tier is shared across your billing
