@@ -19,25 +19,27 @@ Zotero itself is optional: without it you can still search and send
 papers one-off. The reading queue, collections, and duplicate
 protection across sessions need it.
 
-## Architecture
+## How it works
 
-Hub-and-spoke. Zotero is the library hub and this server is the delivery
-spoke, so all state lives in Zotero:
+You ask Claude for papers; it uses paperboy's tools to find, queue, and
+deliver them. What that looks like in practice:
 
-- Papers land in a **Reading Queue** collection, created on demand.
-- Delivery is recorded by tagging the item `sent-to-ereader`.
-- Papers can also be filed into topical collections. Zotero items can
-  belong to many collections at once, so filing never disturbs queue
-  state. Claude proposes a collection based on the paper's topic and
-  your existing collection names, and asks you when the fit is unclear.
-- The server itself is stateless. No database, safe to redeploy.
+- Papers you queue land in a **Reading Queue** collection in Zotero,
+  created on demand.
+- Once a paper reaches your device, paperboy tags it `sent-to-ereader`,
+  so the same paper never goes to your e-reader twice — even in a
+  different conversation weeks later.
+- Claude can file papers into your topical collections too. It proposes
+  one from the paper's topic and your existing collection names, and
+  asks you when the fit is unclear. A paper can sit in several
+  collections at once, so filing never disturbs the queue.
+- Papers are found by arXiv id, DOI, or title (a close-enough title
+  match, so a reading list Claude wrote in the chat can be sent as-is).
+  When a paper can't be found or has no free PDF, the receipt says so —
+  nothing is dropped silently.
 
-Papers are resolved by arXiv id, DOI, or bare title (high-confidence
-fuzzy match only, so a reading list Claude produced in conversation can
-be sent directly). Search runs against OpenAlex (~250M works) or arXiv.
-When a paper can't be resolved or has no open-access PDF, the tool says
-so in its receipt and Claude relays that to you. Nothing is dropped
-silently.
+Zotero holds all of this, so the server keeps no state of its own: no
+database to run, and safe to redeploy at any time.
 
 ### Delivery backends
 
@@ -120,17 +122,29 @@ deploy your own instance.
 ### Deploy your own
 
 One script creates a locked-down, single-tenant Cloud Run service that
-normally costs $0 to run:
+normally costs $0 to run. You need the gcloud CLI and a Google Cloud
+account with billing enabled — a card has to be on file, but paperboy's
+usage stays inside the free tier.
 
 ```bash
 uv run paperboy setup && ./deploy/deploy.sh my-paperboy-project
 ```
 
-Claude Code and API clients connect with the bearer token; claude.ai
-and the mobile app connect through a Google sign-in restricted to your
-account (one extra one-time setup step — the script prints it).
-[docs/deploy.md](docs/deploy.md) covers what the script sets up, the
-security model, and cost bounds.
+How a client connects to the deployed server depends on the client:
+
+- **Claude Code and the API** use a bearer token the script generates.
+  You paste it into an `Authorization` header, as in the section above.
+- **claude.ai and the Claude mobile app** can't send a bearer token, so
+  they sign in with Google instead. That needs a one-time Google OAuth
+  client, which you create in your own Cloud project (a Web-application
+  client with one redirect URI). Sign-in is restricted to your own
+  email address, and because paperboy only asks Google for your email,
+  the sign-in doesn't expire.
+
+[docs/deploy.md](docs/deploy.md) has the full procedure for both,
+including the OAuth console steps, the security model, and cost bounds.
+The deploy script also prints the exact OAuth steps with your project's
+URLs already filled in, so you're not copying them from here.
 
 ## Development
 
@@ -146,8 +160,6 @@ uv for packaging, ruff (Google style), ty, pytest behind an enforced
       default)
 - [ ] Kindle highlights → Zotero notes round-trip (`My Clippings.txt`
       parser with fuzzy title matching)
-- [x] Google OAuth for claude.ai and mobile connectors (see
-      [docs/deploy.md](docs/deploy.md))
 
 ## Prior art & acknowledgments
 
