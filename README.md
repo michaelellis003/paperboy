@@ -27,7 +27,7 @@ deliver them. What that looks like in practice:
 - Papers you queue land in a **Reading Queue** collection in Zotero,
   created on demand.
 - Once a paper reaches your device, paperboy tags it `sent-to-ereader`,
-  so the same paper never goes to your e-reader twice — even in a
+  so the same paper never goes to your e-reader twice, even in a
   different conversation weeks later.
 - Claude can file papers into your topical collections too. It proposes
   one from the paper's topic and your existing collection names, and
@@ -35,8 +35,8 @@ deliver them. What that looks like in practice:
   collections at once, so filing never disturbs the queue.
 - Papers are found by arXiv id, DOI, or title (a close-enough title
   match, so a reading list Claude wrote in the chat can be sent as-is).
-  When a paper can't be found or has no free PDF, the receipt says so —
-  nothing is dropped silently.
+  When a paper can't be found or has no free PDF, the receipt says so.
+  Nothing is dropped silently.
 
 Zotero holds all of this, so the server keeps no state of its own: no
 database to run, and safe to redeploy at any time.
@@ -58,7 +58,7 @@ database to run, and safe to redeploy at any time.
 | `queue_papers` | Add papers to the Zotero Reading Queue without sending (optionally filed into topical collections) |
 | `list_collections` | List Zotero collections so Claude can propose where to file a paper, or ask you |
 | `file_papers` | File queued papers into a topical collection (created on demand; queue membership unaffected) |
-| `unfile_papers` | Remove papers from one collection — for misfiled items; the papers themselves and their queue/sent state are untouched |
+| `unfile_papers` | Remove papers from one collection (for misfiled items); the papers themselves and their queue/sent state are untouched |
 | `list_queue` | Show the queue with per-item status (unsent / sent / no-open-access-pdf) |
 | `remove_from_queue` | Delete queue items by exact ref or title |
 | `send_queue` | Send every unsent queue item (auto-split under email limits), then tag as sent |
@@ -114,7 +114,7 @@ claude mcp add --transport http paperboy <URL>/mcp \
 ```
 
 The URL needs the `/mcp` path suffix. Treat the token like a password:
-it lets you act fully as the owner — send email from their address,
+it lets you act fully as the owner: send email from their address,
 deliver to their e-reader, and read and edit their Zotero library.
 There is no reduced-permission mode; if that's not what you both want,
 deploy your own instance.
@@ -123,7 +123,7 @@ deploy your own instance.
 
 One script creates a locked-down, single-tenant Cloud Run service that
 normally costs $0 to run. You need the gcloud CLI and a Google Cloud
-account with billing enabled — a card has to be on file, but paperboy's
+account with billing enabled. A card has to be on file, but paperboy's
 usage stays inside the free tier.
 
 ```bash
@@ -169,7 +169,7 @@ Ideas paperboy builds on: the tag-driven Zotero→Kindle idea from
 [wahiggins3/send-to-kindle-mcp](https://github.com/wahiggins3/send-to-kindle-mcp);
 [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp);
 and [54yyyu/zotero-mcp](https://github.com/54yyyu/zotero-mcp), the
-model for our setup wizard — paperboy leaves library management to it.
+model for our setup wizard; paperboy leaves library management to it.
 
 Thank you to [arXiv](https://arxiv.org) for use of its open access
 interoperability. Paper metadata and open-access links come from

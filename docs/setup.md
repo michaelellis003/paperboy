@@ -18,7 +18,7 @@ Zotero. What you set up depends on your device:
 - **Kindle**: your Send-to-Kindle email address and an email account to
   send from (a Gmail App Password is the common choice).
 - **Kobo**: a Dropbox app, because Kobo syncs files from Dropbox.
-- **PocketBook**: same as Kindle — its Send-to-PocketBook address and a
+- **PocketBook**: same as Kindle, its Send-to-PocketBook address and a
   sending account.
 - **Zotero** (optional): an API key, if you want the reading queue,
   collections, and duplicate protection.
@@ -41,12 +41,12 @@ than using the wizard, your numeric **userID** as well. Both are on
 To create the key, click **Create new private key**, give it a name,
 then check **Allow library access** and **Allow write access**.
 paperboy needs write access to create the queue and tag items; without
-it, queueing fails. Save the key and copy it — Zotero shows the full
+it, queueing fails. Save the key and copy it. Zotero shows the full
 key only once.
 
 The wizard looks up your userID from the key automatically, so you can
 skip it. If you're filling in `.env` yourself, the top of the same page
-reads "Your userID for use in API calls is `<number>`" — that number is
+reads "Your userID for use in API calls is `<number>`". That number is
 your `ZOTERO_LIBRARY_ID`, and it is not your username.
 
 Reference:
@@ -88,7 +88,7 @@ you have **2-Step Verification** turned on. Create one at
 [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
 (you may be asked to sign in again). Use it as the SMTP password. The
 Gmail server settings are `smtp.gmail.com`, port 465 for SSL or 587 for
-TLS — the wizard defaults to 465.
+TLS. The wizard defaults to 465.
 
 App Passwords are unavailable if your only second factor is a security
 key, if your account is a work or school (Google Workspace) account
@@ -134,7 +134,7 @@ obtains for you: it opens a Dropbox authorize page, you click **Allow**,
 you paste the code back, and it exchanges the code for the token.
 
 If you set this up by hand instead, the authorize URL must include
-`token_access_type=offline` — that is what makes Dropbox return a
+`token_access_type=offline`, which is what makes Dropbox return a
 refresh token rather than a short-lived one:
 
 ```
@@ -188,18 +188,18 @@ claude mcp add paperboy -- uv run --directory /path/to/paperboy paperboy
 
 Replace `/path/to/paperboy` with the absolute path to your clone (run
 `pwd` in the repo to get it). `--directory` matters: paperboy reads
-`.env` from that directory. Now
-ask Claude to find a paper and send it to your device.
+`.env` from that directory. Now ask Claude to find a paper and send it
+to your device.
 
 If you'd rather fill in credentials by hand, copy `.env.example` to
-`.env` and edit it — every variable is documented there. If paperboy is
+`.env` and edit it; every variable is documented there. If paperboy is
 added but only half-configured, ask Claude to "check my paperboy setup"
 and the `setup_status` tool reports what's still missing.
 
 ## Reaching paperboy from claude.ai or your phone
 
 Running locally covers Claude Code and Claude Desktop. To use paperboy
-from claude.ai or the Claude mobile app, deploy it to Google Cloud Run —
-your own instance, your own secrets, normally free. That is covered in
-[docs/deploy.md](deploy.md), including the one-time Google sign-in setup
-that lets the mobile and web apps connect.
+from claude.ai or the Claude mobile app, deploy it to Google Cloud Run,
+where it runs as your own private instance and normally costs nothing.
+That is covered in [docs/deploy.md](deploy.md), including the one-time
+Google sign-in setup that lets the mobile and web apps connect.

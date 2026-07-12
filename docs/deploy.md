@@ -19,7 +19,7 @@ You need three things:
   credentials.
 - **A Google Cloud account with billing enabled.** Signing up gives you
   a $300 welcome credit over 90 days, and a payment method is required
-  even to stay within the free tier — Cloud Run bills nothing at
+  even to stay within the free tier. Cloud Run bills nothing at
   paperboy's traffic, but Google still wants a card on file. You are
   not charged unless you manually upgrade to a paid account
   ([free tier](https://cloud.google.com/free),
@@ -123,8 +123,8 @@ redirect URI already filled in:
 Two things worth knowing about this setup:
 
 - **Only accounts on `OAUTH_ALLOWED_EMAILS` can sign in**, and anyone
-  on that list has full control of the server — sending email from your
-  address and editing your Zotero library — so it is normally just your
+  on that list has full control of the server (sending email from your
+  address and editing your Zotero library), so it is normally just your
   own address.
 - **You can leave the app in Testing; your sign-in will not expire.**
   Google normally expires test-user sign-ins after 7 days, but it makes
