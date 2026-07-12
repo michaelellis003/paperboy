@@ -1199,3 +1199,45 @@ def test_book_isbn_matches_any_stored_token(fake_api):
     key, status, _ = zotero_client.add_book(book)
     assert (key, status) == ("BK", "existing")
     assert fake_api.created == []
+
+
+def test_file_by_refs_two_refs_same_item_files_once(fake_api):
+    # A ref by DOI and a ref by title can name the same queue item; the
+    # second must not trigger a stale-version write (412) or a double
+    # count — the item is filed once and the extra ref is consumed.
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {"title": "Alpha", "DOI": "10.1000/alpha"},
+        }
+    ]
+    filed, misses, ambiguous = zotero_client.file_by_refs(
+        ["10.1000/alpha", "Alpha"], "Topical"
+    )
+    assert filed == ["Alpha"]
+    assert misses == []
+    assert ambiguous == []
+    assert fake_api.collection_adds == [("NEWCOLL", "A")]
+
+
+def test_unfile_by_refs_two_refs_same_item_removes_once(fake_api):
+    fake_api.existing_collections.append(
+        {"key": "TOPIC", "data": {"name": "Topical"}}
+    )
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Alpha",
+                "DOI": "10.1000/alpha",
+                "collections": ["TOPIC"],
+            },
+        }
+    ]
+    removed, misses, ambiguous = zotero_client.unfile_by_refs(
+        ["10.1000/alpha", "Alpha"], "Topical"
+    )
+    assert removed == ["Alpha"]
+    assert misses == []
+    assert ambiguous == []
+    assert fake_api.uncollected == [("TOPIC", "A")]

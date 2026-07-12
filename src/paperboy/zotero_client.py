@@ -671,19 +671,27 @@ def file_by_refs(
     items = _queue_items()
     filed, misses, ambiguous = [], [], []
     key: str | None = None
+    done: set[str] = set()
     for ref in refs:
         matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
             continue
-        if len(matches) > 1:
-            ambiguous.append(_ambiguity(ref, matches))
+        # Two refs naming the same item (its DOI and its title, say):
+        # the item is already filed, and a second stale-version write
+        # would 412 against the real API. Consume the ref silently.
+        fresh = [m for m in matches if m["key"] not in done]
+        if not fresh:
+            continue
+        if len(fresh) > 1:
+            ambiguous.append(_ambiguity(ref, fresh))
             continue
         if key is None:
             key = collection_key(collection_name, create=True)
         if key:
-            _add_to_collection(matches[0], key)
-        filed.append(matches[0]["data"].get("title", matches[0]["key"]))
+            _add_to_collection(fresh[0], key)
+        done.add(fresh[0]["key"])
+        filed.append(fresh[0]["data"].get("title", fresh[0]["key"]))
     return filed, misses, ambiguous
 
 
@@ -707,16 +715,23 @@ def unfile_by_refs(
     api = _api()
     items = api.everything(api.collection_items_top(key))
     removed, misses, ambiguous = [], [], []
+    done: set[str] = set()
     for ref in refs:
         matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
             continue
-        if len(matches) > 1:
-            ambiguous.append(_ambiguity(ref, matches))
+        # A second ref naming an item already removed this call would
+        # re-PATCH with a stale version (412). Consume it silently.
+        fresh = [m for m in matches if m["key"] not in done]
+        if not fresh:
             continue
-        api.deletefrom_collection(key, matches[0])
-        removed.append(matches[0]["data"].get("title", matches[0]["key"]))
+        if len(fresh) > 1:
+            ambiguous.append(_ambiguity(ref, fresh))
+            continue
+        api.deletefrom_collection(key, fresh[0])
+        done.add(fresh[0]["key"])
+        removed.append(fresh[0]["data"].get("title", fresh[0]["key"]))
     return removed, misses, ambiguous
 
 
