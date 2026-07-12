@@ -15,6 +15,10 @@ class FakeZotero:
         self.deleted = []
         self.tagged = []
         self.fail_create = False
+        # Mirror pyzotero: 'deleted' is NOT a writable key by default,
+        # so update_item rejects it until temp_keys is widened. This is
+        # what the real API enforces; the trash path must widen first.
+        self.temp_keys = {"key", "etag", "group_id", "updated"}
 
     def everything(self, value):
         return value
@@ -80,13 +84,20 @@ class FakeZotero:
         self.deleted.append(item["key"])
         self.queue = [i for i in self.queue if i["key"] != item["key"]]
 
-    def update_item(self, item):
+    def update_item(self, payload):
+        # Mirror pyzotero's check_items: reject keys not in the base
+        # template plus temp_keys. This is what caught the real bug —
+        # 'deleted' must be whitelisted via temp_keys before it sends.
+        base = {"key", "version", "data", "collections", "tags"}
+        for key in payload:
+            if key not in base and key not in self.temp_keys:
+                raise ValueError(f"Invalid keys present in item: {key}")
         self.updated = getattr(self, "updated", [])
-        self.updated.append(item["key"])
-        if item["data"].get("deleted"):
+        self.updated.append(payload["key"])
+        if payload.get("deleted"):
             self.trashed = getattr(self, "trashed", [])
-            self.trashed.append(item["key"])
-            self.queue = [i for i in self.queue if i["key"] != item["key"]]
+            self.trashed.append(payload["key"])
+            self.queue = [i for i in self.queue if i["key"] != payload["key"]]
 
 
 @pytest.fixture
@@ -261,6 +272,20 @@ def test_remove_by_refs(fake_api):
     # Moved to Zotero's Trash (restorable), never permanently deleted.
     assert fake_api.trashed == ["A", "B"]
     assert fake_api.deleted == []
+
+
+def test_trash_requires_whitelisting_deleted_key(fake_api):
+    # Guards the real-API bug: update_item rejects 'deleted' until
+    # temp_keys is widened, so a trash that skipped the widening (or
+    # sent the whole item) would raise, exactly as the live API did.
+    fake_api.queue = [{"key": "A", "data": {"title": "Solo", "version": 5}}]
+    # Sanity: the fake rejects 'deleted' before any widening.
+    with pytest.raises(ValueError, match="Invalid keys"):
+        fake_api.update_item({"key": "A", "version": 5, "deleted": 1})
+    # remove_by_refs must succeed anyway — _trash_item widens first.
+    removed, _, _ = zotero_client.remove_by_refs(["Solo"])
+    assert [e["title"] for e in removed] == ["Solo"]
+    assert fake_api.trashed == ["A"]
 
 
 def test_remove_by_refs_refuses_ambiguous_title(fake_api):

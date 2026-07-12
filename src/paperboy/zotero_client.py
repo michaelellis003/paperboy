@@ -374,6 +374,19 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
     ).endswith(f"/abs/{arxiv_id}")
 
 
+def _trash_item(api: zotero.Zotero, item: dict) -> None:
+    """Move an item to Zotero's Trash (restorable), not hard-delete it.
+
+    A minimal PATCH of ``deleted: 1`` with the item's version is what
+    the Zotero API accepts to trash an item. pyzotero's write validator
+    rejects ``deleted`` by default, so widen its allow-list first; the
+    version gives optimistic-locking on the update.
+    """
+    api.temp_keys = set(api.temp_keys) | {"deleted"}
+    version = item.get("version") or item["data"].get("version")
+    api.update_item({"key": item["key"], "version": version, "deleted": 1})
+
+
 def _unique_ref(data: dict[str, Any]) -> str:
     """The most specific ref for an item, for disambiguation hints."""
     archive = data.get("archiveID", "")
@@ -430,8 +443,7 @@ def remove_by_refs(
         if other:
             api.deletefrom_collection(queue_key, match)
         else:
-            match["data"]["deleted"] = 1
-            api.update_item(match)
+            _trash_item(api, match)
         items.remove(match)
         removed.append(
             {
