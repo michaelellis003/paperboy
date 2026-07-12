@@ -80,6 +80,14 @@ class FakeZotero:
         self.deleted.append(item["key"])
         self.queue = [i for i in self.queue if i["key"] != item["key"]]
 
+    def update_item(self, item):
+        self.updated = getattr(self, "updated", [])
+        self.updated.append(item["key"])
+        if item["data"].get("deleted"):
+            self.trashed = getattr(self, "trashed", [])
+            self.trashed.append(item["key"])
+            self.queue = [i for i in self.queue if i["key"] != item["key"]]
+
 
 @pytest.fixture
 def fake_api(env, monkeypatch):
@@ -249,7 +257,9 @@ def test_remove_by_refs(fake_api):
     )
     assert [entry["title"] for entry in removed] == ["Alpha", "Beta"]
     assert misses == ["nonexistent"]
-    assert fake_api.deleted == ["A", "B"]
+    # Moved to Zotero's Trash (restorable), never permanently deleted.
+    assert fake_api.trashed == ["A", "B"]
+    assert fake_api.deleted == []
 
 
 def test_remove_by_refs_reports_sent_state(env, fake_api):
@@ -289,8 +299,9 @@ def test_remove_keeps_items_filed_elsewhere(env, fake_api):
     assert removed == [
         {"title": "Filed Paper", "was_sent": True, "kept_in_library": True}
     ]
-    # dropped from the queue collection, NOT deleted from the library
+    # dropped from the queue collection, NOT trashed or deleted
     assert fake_api.deleted == []
+    assert getattr(fake_api, "trashed", []) == []
     assert fake_api.uncollected == [("COLL", "A")]
 
 

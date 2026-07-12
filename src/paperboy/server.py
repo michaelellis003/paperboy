@@ -696,9 +696,11 @@ def remove_from_queue(refs: list[str]) -> str:
     Matches each ref (arXiv id, DOI, URL, or exact title) against
     queue items. Items filed into other collections keep their library
     record (and sent-state) and only leave the queue; items that live
-    nowhere else are deleted from the library, which erases their
-    sent-state — sending those again later will deliver them again.
-    Nothing is ever deleted from the e-reader.
+    nowhere else are moved to Zotero's Trash (restorable in the Zotero
+    app for ~30 days). Trashed items no longer count for duplicate
+    protection — sending those again later will deliver them again.
+    Nothing is ever deleted from the e-reader, and nothing is ever
+    permanently deleted from Zotero.
     """
     removed, misses = zotero_client.remove_by_refs(refs)
     receipt = f"Removed {len(removed)} item(s) from the queue"
@@ -717,8 +719,9 @@ def remove_from_queue(refs: list[str]) -> str:
     ]
     if forgotten:
         receipt += (
-            " | note: their sent-state is erased — sending these again "
-            f"later WILL re-deliver: {'; '.join(forgotten)}"
+            " | note: now in Zotero's Trash and no longer counted for "
+            "duplicate protection — sending these again later WILL "
+            f"re-deliver: {'; '.join(forgotten)}"
         )
     if misses:
         receipt += f" | Not found in queue: {'; '.join(misses)}"

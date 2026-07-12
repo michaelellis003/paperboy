@@ -906,7 +906,7 @@ def test_remove_from_queue_warns_on_sent_items(env, monkeypatch):
         ),
     )
     receipt = server.remove_from_queue(["10.1/a"])
-    assert "sent-state is erased" in receipt
+    assert "Zotero's Trash" in receipt
     assert "WILL re-deliver: Read One" in receipt
 
 

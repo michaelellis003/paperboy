@@ -375,8 +375,10 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
 
 
 def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
-    """Delete queue items matching each ref (id, DOI, URL, or title).
+    """Remove queue items matching each ref (id, DOI, URL, or title).
 
+    Items also filed elsewhere just leave the queue; items that live
+    nowhere else are moved to Zotero's Trash (restorable in the app).
     Matching is exact (normalized ids/DOIs, case-insensitive titles);
     partial or empty refs never match. Returns (removed entries with
     ``title`` and ``was_sent``, refs that matched nothing).
@@ -395,7 +397,8 @@ def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
             continue
         # An item the user filed into topical collections is theirs to
         # keep: only drop its queue membership. Items that live nowhere
-        # else are deleted outright.
+        # else go to Zotero's Trash — same as Delete in the Zotero app,
+        # restorable for ~30 days — never permanent deletion.
         other = [
             key
             for key in match["data"].get("collections", [])
@@ -404,7 +407,8 @@ def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
         if other:
             api.deletefrom_collection(queue_key, match)
         else:
-            api.delete_item(match)
+            match["data"]["deleted"] = 1
+            api.update_item(match)
         items.remove(match)
         removed.append(
             {
