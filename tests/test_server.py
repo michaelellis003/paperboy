@@ -444,7 +444,7 @@ def test_send_papers_nothing_resolves(env, monkeypatch):
 
     monkeypatch.setattr(resolver, "resolve", fail)
     receipt = server.send_papers(["gibberish"])
-    assert receipt == "Nothing was sent. could not resolve: gibberish"
+    assert receipt == "Nothing was sent. | could not resolve: gibberish"
 
 
 def test_send_papers_dedupes_refs_in_call(
@@ -824,6 +824,71 @@ def test_queue_papers_files_into_collections(
     assert "filed under: State Space Models" in receipt
 
 
+def test_queue_papers_reports_filing_for_already_queued(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    # Filing happens even when the paper was already queued; a receipt
+    # reading as a pure no-op would misreport a real mutation.
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "already_queued"),
+    )
+    receipt = server.queue_papers(["2401.12345"], collections=["Topic"])
+    assert "already in queue" in receipt
+    assert "also filed under: Topic" in receipt
+
+
+def test_queue_papers_drops_reading_queue_from_collections(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    seen = {}
+
+    def fake_add(paper, collections=None):
+        seen["collections"] = collections
+        return "KEY", "created"
+
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(zotero_client, "add_paper", fake_add)
+    receipt = server.queue_papers(["2401.12345"], collections=["Reading Queue"])
+    assert seen["collections"] is None
+    assert "dropped the Reading Queue from collections" in receipt
+
+
+def test_resolve_all_reports_429_as_transient(env, monkeypatch):
+    request = httpx.Request("GET", "https://api.openalex.org/works")
+
+    def throttled(ref):
+        raise httpx.HTTPStatusError(
+            "429",
+            request=request,
+            response=httpx.Response(429, request=request),
+        )
+
+    monkeypatch.setattr(resolver, "resolve", throttled)
+    resolved, problems = server._resolve_all(["Mastering the game of Go"])
+    assert resolved == []
+    assert "rate-limited" in problems[0]
+    assert "wait a minute and retry" in problems[0]
+    assert "could not resolve" not in problems[0]
+
+
+def test_resolve_all_keeps_permanent_4xx_as_could_not_resolve(env, monkeypatch):
+    request = httpx.Request("GET", "https://api.crossref.org/works/x")
+
+    def gone(ref):
+        raise httpx.HTTPStatusError(
+            "404",
+            request=request,
+            response=httpx.Response(404, request=request),
+        )
+
+    monkeypatch.setattr(resolver, "resolve", gone)
+    _, problems = server._resolve_all(["10.9999/nope"])
+    assert "could not resolve" in problems[0]
+
+
 def test_send_papers_files_into_collections(
     zotero_env, monkeypatch, paper_factory, sent_documents, no_download
 ):
@@ -962,12 +1027,20 @@ def test_file_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
         lambda refs, name: (
             [],
             [],
-            [{"ref": "dup title", "candidates": ["KEY1", "KEY2"]}],
+            [
+                {
+                    "ref": "dup title",
+                    "candidates": [
+                        {"key": "KEY1", "id": "arXiv:1"},
+                        {"key": "KEY2", "id": "arXiv:1"},
+                    ],
+                }
+            ],
         ),
     )
     receipt = server.file_papers(["dup title"], "Topic")
     assert "NOT filed (ambiguous" in receipt
-    assert "KEY1, KEY2" in receipt
+    assert "item key KEY1" in receipt and "item key KEY2" in receipt
 
 
 def test_unfile_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
@@ -977,11 +1050,20 @@ def test_unfile_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
         lambda refs, name: (
             [],
             [],
-            [{"ref": "dup title", "candidates": ["KEY1", "KEY2"]}],
+            [
+                {
+                    "ref": "dup title",
+                    "candidates": [
+                        {"key": "KEY1", "id": "no other id"},
+                        {"key": "KEY2", "id": "no other id"},
+                    ],
+                }
+            ],
         ),
     )
     receipt = server.unfile_papers(["dup title"], "Topic")
     assert "NOT removed (ambiguous" in receipt
+    assert "item key KEY1" in receipt
 
 
 def test_remove_from_queue_ignores_blank_refs(env, monkeypatch):
@@ -1071,7 +1153,10 @@ def test_remove_from_queue_reports_ambiguity(env, monkeypatch):
             [
                 {
                     "ref": "same title",
-                    "candidates": ["arXiv:2401.12345", "10.1000/pub"],
+                    "candidates": [
+                        {"key": "PRE", "id": "arXiv:2401.12345"},
+                        {"key": "PUB", "id": "10.1000/pub"},
+                    ],
                 }
             ],
         ),
@@ -1079,7 +1164,8 @@ def test_remove_from_queue_reports_ambiguity(env, monkeypatch):
     receipt = server.remove_from_queue(["same title"])
     assert "Removed 0 item(s)" in receipt
     assert "NOT removed (ambiguous" in receipt
-    assert "arXiv:2401.12345, 10.1000/pub" in receipt
+    assert "item key PRE (arXiv:2401.12345)" in receipt
+    assert "re-run with that item key" in receipt
 
 
 def test_setup_status_flags_invalid_delivery_method(env):

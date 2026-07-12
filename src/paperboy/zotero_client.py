@@ -234,10 +234,16 @@ def _matching_items(ref: str, items: list[dict]) -> list[dict]:
 
 
 def _ambiguity(ref: str, matches: list[dict]) -> dict:
+    """Describe an ambiguous ref with per-candidate consumable keys.
+
+    Every candidate carries the Zotero item key: exact duplicates (two
+    items with the same arXiv id) share every other identifier, so the
+    key is the only id guaranteed to single one out.
+    """
     return {
         "ref": ref,
         "candidates": [
-            _unique_ref({**m["data"], "key": m["key"]}) for m in matches
+            {"key": m["key"], "id": _unique_ref(m["data"])} for m in matches
         ],
     }
 
@@ -385,6 +391,9 @@ def list_queue() -> list[dict]:
             {
                 "title": data.get("title", item["key"]),
                 "ref": data.get("DOI") or data.get("url") or item["key"],
+                # The item key is the only id guaranteed unique when the
+                # library holds exact duplicates; every tool accepts it.
+                "key": item["key"],
                 "status": status,
                 "added": data.get("dateAdded", "")[:10],
             }
@@ -428,11 +437,11 @@ def _trash_item(api: zotero.Zotero, item: dict) -> None:
 
 
 def _unique_ref(data: dict[str, Any]) -> str:
-    """The most specific ref for an item, for disambiguation hints."""
+    """The most recognizable id for an item, for disambiguation hints."""
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
         return archive
-    return data.get("DOI") or data.get("url") or data.get("key", "?")
+    return data.get("DOI") or data.get("url") or "no other id"
 
 
 def remove_by_refs(

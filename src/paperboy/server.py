@@ -281,16 +281,25 @@ def _interest_results(phrase: str, problems: list[str]) -> list[Paper]:
 def _clean_collections(
     collections: list[str] | None,
 ) -> tuple[list[str] | None, str]:
-    """Drop empty collection names; report when any were dropped."""
+    """Drop empty and Reading-Queue collection names, with notes.
+
+    Queue membership is what queue_papers/send_papers already handle,
+    so naming the queue in ``collections`` is redundant at best and at
+    worst reads as extra filing that never happens.
+    """
     if not collections:
         return None, ""
+    notes = []
     cleaned = [name.strip() for name in collections if name.strip()]
-    note = (
-        " | ignored empty collection name(s)"
-        if len(cleaned) < len(collections)
-        else ""
-    )
-    return (cleaned or None), note
+    if len(cleaned) < len(collections):
+        notes.append(" | ignored empty collection name(s)")
+    without_queue = [n for n in cleaned if not _is_queue_collection(n)]
+    if len(without_queue) < len(cleaned):
+        notes.append(
+            " | dropped the Reading Queue from collections (queue "
+            "membership is already handled)"
+        )
+    return (without_queue or None), "".join(notes)
 
 
 def _drop_blank_refs(refs: list[str]) -> tuple[list[str], str]:
@@ -315,13 +324,15 @@ def _is_queue_collection(collection: str) -> bool:
 def _ambiguity_note(ambiguous: list[dict], verb: str) -> str:
     """Render refused-as-ambiguous refs with their consumable ids."""
     parts = [
-        f"{entry['ref']!r} matches {len(entry['candidates'])} items "
-        f"({', '.join(entry['candidates'])})"
+        f"{entry['ref']!r} matches {len(entry['candidates'])} items: "
+        + ", ".join(
+            f"item key {c['key']} ({c['id']})" for c in entry["candidates"]
+        )
         for entry in ambiguous
     ]
     return (
         f"NOT {verb} (ambiguous — ask the user which, then re-run "
-        f"with that id): {'; '.join(parts)}"
+        f"with that item key alone): {'; '.join(parts)}"
     )
 
 
@@ -361,11 +372,18 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
             problems.append(str(exc))
             continue
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code < 500:
-                # 4xx is deterministic — retrying will never succeed.
+            status = exc.response.status_code
+            # 429 (throttle) and 408 (timeout) are transient — only the
+            # remaining 4xx mean the ref itself will never resolve.
+            if status < 500 and status not in (408, 429):
                 problems.append(
                     f"could not resolve: {ref} (backend rejected the "
-                    f"request: HTTP {exc.response.status_code})"
+                    f"request: HTTP {status})"
+                )
+            elif status == 429:
+                problems.append(
+                    f"backend rate-limited while resolving: {ref} — the "
+                    "ref may be fine; wait a minute and retry"
                 )
             else:
                 problems.append(
@@ -541,7 +559,11 @@ def send_papers(
                 + "; ".join(p.title for p in already_sent)
             )
         parts.extend(problems)
-        return " | ".join(parts)
+        return (
+            " | ".join(parts)
+            + collection_note
+            + _collections_ignored_note(collections)
+        )
 
     # Filing is independent of delivery: papers skipped as already
     # sent still get filed into the requested collections. (Not in
@@ -582,7 +604,7 @@ def send_papers(
         return (
             "Nothing was sent."
             + queued_note
-            + " "
+            + " | "
             + "; ".join(skips + problems)
             + (_oa_hint() if no_pdf else "")
             + collection_note
@@ -674,7 +696,11 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
     else:
         parts = [f"Nothing new to queue in '{queue}'"]
     if already:
-        parts.append(f"already in queue: {'; '.join(already)}")
+        # Filing still happened for these — saying so is not optional:
+        # a receipt reading as a pure no-op while the library gained a
+        # collection would misreport a real mutation.
+        already_filed = filed.replace(" (", " (also ", 1) if filed else ""
+        parts.append(f"already in queue{already_filed}: {'; '.join(already)}")
     if no_pdf:
         parts.append(
             "no open-access PDF (won't be auto-sent): "
@@ -794,7 +820,10 @@ def list_queue() -> list[dict]:
 
     Status is 'unsent', 'sent', or 'no-open-access-pdf'. Use this to
     show the user their queue, before send_queue (which flushes every
-    unsent item), or to find refs for remove_from_queue.
+    unsent item), or to find refs for remove_from_queue. Each entry
+    also carries ``key``, the Zotero item key — the one id that stays
+    unique when the queue holds duplicate entries of the same paper;
+    every ref-taking tool accepts it.
     """
     return zotero_client.list_queue()
 
@@ -812,9 +841,11 @@ def remove_from_queue(refs: list[str]) -> str:
     Nothing is ever deleted from the e-reader, and nothing is ever
     permanently deleted from Zotero.
 
-    A ref that matches more than one queue item (duplicate titles)
-    removes nothing; the receipt lists each candidate's specific id so
-    the user can choose. Relay that choice — never pick for them.
+    A ref that matches more than one queue item (duplicate titles or
+    a duplicated record) removes nothing; the receipt lists each
+    candidate's Zotero item key, which is accepted as a ref and is
+    unique even for exact duplicates. Relay the choice to the user —
+    never pick for them.
     """
     refs, blank_note = _drop_blank_refs(refs)
     removed, misses, ambiguous = zotero_client.remove_by_refs(refs)

@@ -316,7 +316,10 @@ def test_remove_by_refs_refuses_ambiguous_title(fake_api):
     assert ambiguous == [
         {
             "ref": "same title",
-            "candidates": ["arXiv:2401.12345", "10.1000/pub"],
+            "candidates": [
+                {"key": "PRE", "id": "arXiv:2401.12345"},
+                {"key": "PUB", "id": "10.1000/pub"},
+            ],
         }
     ]
     # Nothing was touched.
@@ -364,7 +367,9 @@ def test_file_and_unfile_refuse_ambiguous_titles(fake_api):
         ["same title"], "Topical"
     )
     assert filed == [] and misses == []
-    assert ambiguous[0]["candidates"] == ["A", "B"]
+    assert [c["key"] for c in ambiguous[0]["candidates"]] == ["A", "B"]
+    # Title-only items still get a usable (key) candidate.
+    assert ambiguous[0]["candidates"][0]["id"] == "no other id"
 
     fake_api.queue[0]["data"]["collections"] = ["TOPIC"]
     fake_api.queue[1]["data"]["collections"] = ["TOPIC"]
