@@ -113,6 +113,9 @@ def _resolve_title(ref: str) -> Paper | None:
 
 # File-share and code hosts serve HTML, not registry records; a raw PDF
 # is a payload, not a lookup key — each needs its own honest remedy.
+# All host matching is by domain suffix (host == d or host.endswith(.d))
+# — bare substring checks misfire ("notgithub.com" contains "github.com";
+# "amazon." caught amazon.science, Amazon's research-paper site).
 _SHARE_HOSTS = (
     "github.com",
     "githubusercontent.com",
@@ -121,7 +124,24 @@ _SHARE_HOSTS = (
     "docs.google.com",
     "dropbox.com",
 )
-_BOOK_HOSTS = ("amazon.", "goodreads.com", "bookstore.")
+_BOOK_HOSTS = (
+    "goodreads.com",
+    "amazon.com",
+    "amazon.co.uk",
+    "amazon.de",
+    "amazon.fr",
+    "amazon.it",
+    "amazon.es",
+    "amazon.ca",
+    "amazon.co.jp",
+    "amazon.com.au",
+    "amazon.com.br",
+    "amazon.in",
+)
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
 
 
 def _classify_url(url: str) -> str:
@@ -133,8 +153,9 @@ def _classify_url(url: str) -> str:
     each shape gets the remedy that actually fits.
     """
     parts = urlsplit(url.lower())
-    host, path = parts.netloc, parts.path
-    if any(share in host for share in _SHARE_HOSTS):
+    host = parts.netloc.split(":", 1)[0]
+    path = parts.path
+    if any(_host_matches(host, share) for share in _SHARE_HOSTS):
         return (
             "this is a file-share or code-host link, not a registry "
             "record — use attach_pdf with the PDF, or give a DOI, arXiv "
@@ -146,7 +167,15 @@ def _classify_url(url: str) -> str:
             "(arXiv, Crossref, OpenAlex), not by fetching URLs — use "
             "attach_pdf to ingest a PDF you already have"
         )
-    if any(book in host for book in _BOOK_HOSTS) or "/book" in path:
+    # "bookstore." is a leading label (bookstore.ams.org, bookstore.gpo.gov);
+    # the path check is on whole segments so /bookmark//booklets don't hit.
+    segments = [s for s in path.split("/") if s]
+    if (
+        any(_host_matches(host, book) for book in _BOOK_HOSTS)
+        or host.startswith("bookstore.")
+        or "book" in segments
+        or "books" in segments
+    ):
         return (
             "this looks like a book (retail or catalog page) — use "
             "add_book with the ISBN, or the title and author"
@@ -206,20 +235,57 @@ def _candidate_pdf_urls(paper: Paper) -> list[str]:
     return urls
 
 
+# Hard cap for attach_pdf downloads. The deployed instance runs with
+# 512 MiB and briefly holds two copies (bytes + a tmpfs temp file that
+# counts against the same memory limit), so an uncapped download of a
+# caller-supplied URL could OOM the whole server. 100 MB covers any
+# real textbook PDF with headroom to spare.
+_MAX_FETCH_BYTES = 100_000_000
+
+
 def fetch_pdf(url: str) -> bytes:
     """Download one URL, verifying the payload is really a PDF.
 
     Used by attach_pdf to ingest a PDF the user points at directly (no
-    registry record involved). Raises ValueError when the URL serves
-    non-PDF content (an HTML anti-bot or landing page), and re-raises
-    httpx errors for transient transport failures.
+    registry record involved) — the one download path fed arbitrary
+    URLs, so it streams with a size cap instead of buffering blindly.
+    Raises ValueError when the URL serves non-PDF content (an HTML
+    anti-bot or landing page) or exceeds the cap, and re-raises httpx
+    errors for transient transport failures.
     """
-    response = client.get(url)
-    response.raise_for_status()
-    if b"%PDF-" not in response.content[:1024]:
+    too_big = ValueError(
+        f"{url} is larger than the {_MAX_FETCH_BYTES // 1_000_000} MB "
+        "attach_pdf limit"
+    )
+    with client.stream("GET", url) as response:
+        response.raise_for_status()
+        length = response.headers.get("content-length")
+        if length and length.isdigit() and int(length) > _MAX_FETCH_BYTES:
+            raise too_big
+        chunks: list[bytes] = []
+        total = 0
+        checked = False
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > _MAX_FETCH_BYTES:
+                raise too_big
+            chunks.append(chunk)
+            # Reject non-PDF payloads on the first KB rather than after
+            # downloading a whole HTML page (or worse).
+            if not checked and total >= 1024:
+                checked = True
+                if b"%PDF-" not in b"".join(chunks)[:1024]:
+                    content_type = response.headers.get(
+                        "content-type", "unknown"
+                    )
+                    raise ValueError(
+                        f"{url} returned non-PDF content ({content_type})"
+                    )
+    content = b"".join(chunks)
+    if b"%PDF-" not in content[:1024]:
         content_type = response.headers.get("content-type", "unknown")
         raise ValueError(f"{url} returned non-PDF content ({content_type})")
-    return response.content
+    return content
 
 
 def download_pdf(paper: Paper) -> bytes:

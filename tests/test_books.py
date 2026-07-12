@@ -331,3 +331,63 @@ def test_title_offer_without_isbn_does_not_point_at_an_isbn(monkeypatch):
     message = str(info.value)
     assert "could not find its ISBN" in message
     assert "re-run add_book with that ISBN" not in message
+
+
+# --- review-round fixes -------------------------------------------------
+
+
+def test_isbn13_labeled_prefix_normalizes():
+    # "ISBN-13: 978-..." is the labeled format on retail/publisher pages;
+    # the digits in the label must not corrupt the number.
+    assert books.normalize_isbn("ISBN-13: 978-0-306-40615-7") == WP_ISBN13
+    assert books.normalize_isbn("ISBN-10: 0-306-40615-2") == WP_ISBN13
+    assert books.normalize_isbn("isbn 978-0-306-40615-7") == WP_ISBN13
+
+
+def test_isbn13_with_x_typo_gets_invalid_isbn_message(monkeypatch):
+    # An ISBN-13 shape with an X (invalid) must get the ISBN message,
+    # not a doomed title search of the digit string.
+    def handler(request):
+        raise AssertionError("must not hit the network for a bad ISBN")
+
+    use_client(monkeypatch, handler)
+    with pytest.raises(ValueError, match="looks like an ISBN"):
+        books.resolve_book("978030640615X")
+
+
+def test_crossref_empty_inner_date_parts_does_not_crash(monkeypatch):
+    # Crossref emits date-parts: [[]] for unknown dates; indexing [0][0]
+    # blindly crashed. The book must resolve with an empty year.
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "type": "book",
+                    "title": ["Undated Book"],
+                    "issued": {"date-parts": [[]]},
+                }
+            },
+        )
+
+    use_client(monkeypatch, handler)
+    book = books.resolve_book("10.1090/stml/078")
+    assert book.title == "Undated Book"
+    assert book.year == ""
+
+
+def test_title_arm_skips_google_after_confident_openlibrary_match(
+    monkeypatch,
+):
+    # Google Books throttles readily; once Open Library has a confident
+    # match the Google call is wasted work and must not happen.
+    def handler(request):
+        if "openlibrary.org/search.json" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"docs": [{"title": "Graphical Models"}]},
+            )
+        raise AssertionError("Google Books must not be called")
+
+    use_client(monkeypatch, handler)
+    assert books.resolve_book("Graphical Models").title == "Graphical Models"

@@ -991,6 +991,9 @@ def attach_pdf(
         # A local path that is a directory, unreadable, etc. — any other
         # read failure gets a clean receipt, not an uncaught exception.
         return f"Could not read {src!r}: {exc}."
+    except httpx.InvalidURL as exc:
+        # Not an HTTPError subclass — without this it would escape raw.
+        return f"Not a valid URL: {src!r} ({exc})."
     except ValueError as exc:
         return f"Could not ingest the PDF: {exc}"
     except httpx.HTTPError as exc:
@@ -1005,7 +1008,7 @@ def attach_pdf(
         with open(pdf_path, "wb") as handle:
             handle.write(content)
         try:
-            _, attached = zotero_client.attach_pdf_item(
+            _, status, attached = zotero_client.attach_pdf_item(
                 item_type=item_type,
                 title=title,
                 authors=authors,
@@ -1016,18 +1019,26 @@ def attach_pdf(
                 collections=collections,
             )
         except Exception as exc:
+            # attach_pdf_item swallows upload failures (reported via
+            # ``attached``), so reaching here really does mean the item
+            # was not created.
             return (
                 f"Could not create the Zotero item ({type(exc).__name__}: "
                 f"{exc})."
             )
 
+    verb = "Added" if status == "created" else "Found existing"
     parts = [
-        f"Added {item_type} {title!r} to your library{_filed_note(collections)}"
+        f"{verb} {item_type} {title!r} in your library"
+        f"{_filed_note(collections)}"
     ]
     parts.append(
         "PDF attached"
         if attached
-        else "but the PDF attachment did not upload — retry"
+        else (
+            "the PDF attachment did not upload — re-run attach_pdf to "
+            "retry (the item is kept and reused, not duplicated)"
+        )
     )
     if send:
         receipt, delivered = _deliver([(f"{slug}.pdf", content)])

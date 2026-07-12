@@ -1644,7 +1644,7 @@ def test_attach_pdf_downloads_and_attaches(zotero_env, monkeypatch):
     def fake_attach(**kwargs):
         captured.update(kwargs)
         captured["path_exists"] = os.path.exists(kwargs["pdf_path"])
-        return ("K", True)
+        return ("K", "created", True)
 
     monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7 data")
     monkeypatch.setattr(zotero_client, "attach_pdf_item", fake_attach)
@@ -1688,7 +1688,7 @@ def test_attach_pdf_non_pdf_content(zotero_env, monkeypatch):
 def test_attach_pdf_send_delivers(zotero_env, monkeypatch, sent_documents):
     monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF- bytes")
     monkeypatch.setattr(
-        zotero_client, "attach_pdf_item", lambda **kw: ("K", True)
+        zotero_client, "attach_pdf_item", lambda **kw: ("K", "created", True)
     )
     result = server.attach_pdf(
         "https://host/oa-textbook.pdf",
@@ -1699,3 +1699,41 @@ def test_attach_pdf_send_delivers(zotero_env, monkeypatch, sent_documents):
     )
     assert "sent to your e-reader" in result
     assert len(sent_documents) == 1
+
+
+# --- review-round fixes -------------------------------------------------
+
+
+def test_attach_pdf_invalid_url_gets_clean_receipt(zotero_env, monkeypatch):
+    def raise_invalid(url):
+        raise httpx.InvalidURL("Invalid port: ':1'")
+
+    monkeypatch.setattr(resolver, "fetch_pdf", raise_invalid)
+    result = server.attach_pdf("http://[::1/paper.pdf", "T", ["A"])
+    assert result.startswith("Not a valid URL")
+
+
+def test_attach_pdf_reuse_receipt_says_found_existing(zotero_env, monkeypatch):
+    monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7")
+    monkeypatch.setattr(
+        zotero_client,
+        "attach_pdf_item",
+        lambda **kw: ("K", "existing", True),
+    )
+    result = server.attach_pdf("https://x/y.pdf", "Notes", ["A"])
+    assert "Found existing" in result
+    assert "PDF attached" in result
+
+
+def test_attach_pdf_failed_upload_receipt_promises_safe_retry(
+    zotero_env, monkeypatch
+):
+    monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7")
+    monkeypatch.setattr(
+        zotero_client,
+        "attach_pdf_item",
+        lambda **kw: ("K", "created", False),
+    )
+    result = server.attach_pdf("https://x/y.pdf", "Notes", ["A"])
+    assert "did not upload" in result
+    assert "not duplicated" in result
