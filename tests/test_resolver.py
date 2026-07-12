@@ -126,6 +126,34 @@ def test_download_falls_back_to_arxiv(monkeypatch, paper_factory):
     assert resolver.download_pdf(paper) == b"%PDF-arxiv"
 
 
+def test_download_falls_back_to_biorxiv_for_preprint_doi(
+    monkeypatch, paper_factory
+):
+    # A bioRxiv DOI whose OA index has no PDF link: recover it from
+    # bioRxiv's own DOI-derived PDF path.
+    def handler(request):
+        if request.url.host == "www.biorxiv.org":
+            return httpx.Response(200, content=b"%PDF-biorxiv")
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    paper = paper_factory(pdf_url=None, arxiv_id=None, doi="10.1101/820936")
+    assert resolver.download_pdf(paper) == b"%PDF-biorxiv"
+
+
+def test_biorxiv_fallback_only_for_preprint_dois(paper_factory):
+    journal = paper_factory(pdf_url=None, arxiv_id=None, doi="10.1038/x")
+    assert not resolver._candidate_pdf_urls(journal)
+    preprint = paper_factory(pdf_url=None, arxiv_id=None, doi="10.1101/820936")
+    urls = resolver._candidate_pdf_urls(preprint)
+    assert any("biorxiv.org" in u for u in urls)
+    assert any("medrxiv.org" in u for u in urls)
+
+
 def test_download_rejects_html_masquerading_as_pdf(monkeypatch, paper_factory):
     def handler(request):
         if request.url.host == "arxiv.org":

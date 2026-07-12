@@ -564,13 +564,33 @@ def test_send_papers_dry_run(env, monkeypatch, paper_factory):
     assert "A Test Paper (2.5 MB)" in receipt
 
 
+def test_send_papers_dry_run_mixed_sizes(env, monkeypatch, paper_factory):
+    papers = [
+        paper_factory(title="Known", arxiv_id="2401.1"),
+        paper_factory(title="Unknown", arxiv_id="2401.2"),
+    ]
+    monkeypatch.setattr(resolver, "resolve", lambda ref: papers.pop(0))
+    monkeypatch.setattr(
+        resolver,
+        "probe_pdf_size",
+        lambda p: 3_000_000 if p.title == "Known" else None,
+    )
+    receipt = server.send_papers(["2401.1", "2401.2"], dry_run=True)
+    # Sum reflects only the sized paper; unknowns are flagged, not summed.
+    assert "~3.0 MB for the ones I could size" in receipt
+    assert "1 of unknown size" in receipt
+    assert "50 MB email limit" in receipt
+
+
 def test_send_papers_dry_run_unknown_size(env, monkeypatch, paper_factory):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(resolver, "probe_pdf_size", lambda p: None)
     receipt = server.send_papers(["2401.12345"], dry_run=True)
     assert "size unknown" in receipt
-    # the headline total must not silently count unknowns as zero
-    assert "+ 1 of unknown size" in receipt
+    # With no sizes known, the headline must NOT lead with a ~0.0 MB
+    # total that undercounts.
+    assert "~0.0 MB" not in receipt
+    assert "1 of unknown size" in receipt
 
 
 # --- chunking --------------------------------------------------------------
@@ -770,6 +790,9 @@ def test_remove_reports_kept_in_library(env, monkeypatch):
     assert "sent-state preserved" in receipt
     # kept items keep their sent tag, so no re-delivery warning
     assert "WILL re-deliver" not in receipt
+    # each title reported once, not listed then re-annotated
+    assert receipt.count("Filed One") == 1
+    assert "Trash" not in receipt  # a kept item is not trashed
 
 
 def test_send_papers_files_already_sent_papers(

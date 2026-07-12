@@ -82,12 +82,29 @@ def resolve(ref: str) -> Paper:
 
 
 def _candidate_pdf_urls(paper: Paper) -> list[str]:
-    """PDF URLs to try, most reliable last-resort being arXiv itself."""
+    """PDF URLs to try, with source-native fallbacks appended.
+
+    The OA index sometimes has no PDF link for a preprint that is in
+    fact freely available at the source (bioRxiv/medRxiv preprints are
+    open by definition, but their DOIs occasionally lack an OA link
+    upstream). Appending the source's own PDF URL recovers those; the
+    download path verifies the payload is a real PDF, so a wrong guess
+    fails safely rather than shipping an HTML page.
+    """
     urls = [paper.pdf_url] if paper.pdf_url else []
     if paper.arxiv_id:
         fallback = f"https://arxiv.org/pdf/{paper.arxiv_id}"
         if fallback not in urls:
             urls.append(fallback)
+    if paper.doi and paper.doi.startswith("10.1101/"):
+        # bioRxiv and medRxiv share the 10.1101 prefix and serve the PDF
+        # at a DOI-derived path that redirects to the latest version.
+        # We can't tell the two apart from the DOI, so offer both hosts;
+        # the wrong one 404s and is skipped by the PDF-verifying download.
+        for host in ("www.biorxiv.org", "www.medrxiv.org"):
+            fallback = f"https://{host}/content/{paper.doi}.full.pdf"
+            if fallback not in urls:
+                urls.append(fallback)
     return urls
 
 

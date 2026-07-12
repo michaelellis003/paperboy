@@ -465,16 +465,28 @@ def send_papers(
     if dry_run:
         lines = []
         total = 0.0
+        known = 0
         unknown = 0
         for paper in sendable:
             size = resolver.probe_pdf_size(paper)
             mb = f"{size / 1e6:.1f} MB" if size else "size unknown"
             total += (size or 0) / 1e6
+            known += 1 if size else 0
             unknown += 0 if size else 1
             lines.append(f"{paper.title} ({mb})")
-        headline = f"Would send {len(sendable)} paper(s), ~{total:.1f} MB"
+        # Only sum the papers we could size. Folding unknowns in as 0
+        # would headline a misleadingly small total — the opposite of
+        # what a pre-send size check is for.
+        if known:
+            headline = f"Would send {len(sendable)} paper(s), ~{total:.1f} MB"
+            headline += " for the ones I could size"
+        else:
+            headline = f"Would send {len(sendable)} paper(s)"
         if unknown:
-            headline += f" + {unknown} of unknown size"
+            headline += (
+                f"; {unknown} of unknown size (could push a batch over "
+                "the 50 MB email limit — send those separately if unsure)"
+            )
         parts = [
             headline + ": " + "; ".join(lines)
             if lines
@@ -707,24 +719,29 @@ def remove_from_queue(refs: list[str]) -> str:
     the user can choose. Relay that choice — never pick for them.
     """
     removed, misses, ambiguous = zotero_client.remove_by_refs(refs)
+    # Partition so each title is reported exactly once, by outcome.
+    kept = [e["title"] for e in removed if e["kept_in_library"]]
+    trashed = [e["title"] for e in removed if not e["kept_in_library"]]
+    forgotten = [
+        e["title"]
+        for e in removed
+        if e["was_sent"] and not e["kept_in_library"]
+    ]
     receipt = f"Removed {len(removed)} item(s) from the queue"
-    if removed:
-        receipt += ": " + "; ".join(entry["title"] for entry in removed)
-    kept = [entry["title"] for entry in removed if entry["kept_in_library"]]
     if kept:
         receipt += (
-            " | kept in the library (still filed in other collections, "
-            f"sent-state preserved): {'; '.join(kept)}"
+            " | kept in the library, still filed in other collections "
+            f"(sent-state preserved): {'; '.join(kept)}"
         )
-    forgotten = [
-        entry["title"]
-        for entry in removed
-        if entry["was_sent"] and not entry["kept_in_library"]
-    ]
+    if trashed:
+        receipt += (
+            " | moved to Zotero's Trash, restorable for ~30 days: "
+            + "; ".join(trashed)
+        )
     if forgotten:
         receipt += (
-            " | note: now in Zotero's Trash and no longer counted for "
-            "duplicate protection — sending these again later WILL "
+            " | note: the trashed items above no longer count for "
+            "duplicate protection, so sending these again later WILL "
             f"re-deliver: {'; '.join(forgotten)}"
         )
     if misses:
