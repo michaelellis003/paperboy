@@ -101,6 +101,9 @@ async def test_static_token_still_works(oauth_env):
     result = await provider.verify_token(STATIC)
     assert result is not None
     assert result.client_id == "paperboy-owner"
+    # The auth middleware enforces the provider's required scopes on
+    # every request; a scopeless static token would 403.
+    assert set(result.scopes) >= set(provider.required_scopes or [])
 
 
 @pytest.mark.anyio

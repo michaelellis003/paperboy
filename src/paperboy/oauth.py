@@ -90,8 +90,13 @@ class PaperboyAuth(GoogleProvider):
         if self._static_token and secrets.compare_digest(
             token, self._static_token
         ):
+            # Carry the provider's required scopes: the auth middleware
+            # checks them on every request, whichever way the client
+            # signed in.
             return AccessToken(
-                token=token, client_id="paperboy-owner", scopes=[]
+                token=token,
+                client_id="paperboy-owner",
+                scopes=list(self.required_scopes or []),
             )
         return await super().verify_token(token)
 
