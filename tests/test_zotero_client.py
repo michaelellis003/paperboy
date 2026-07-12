@@ -551,6 +551,15 @@ def test_file_by_refs(fake_api):
     assert fake_api.queue[0]["data"]["collections"] == ["NEWCOLL"]
 
 
+def test_file_by_refs_no_match_creates_no_collection(fake_api):
+    fake_api.queue = [{"key": "A", "data": {"title": "Alpha"}}]
+    filed, misses = zotero_client.file_by_refs(["missing-ref"], "Phantom")
+    assert filed == []
+    assert misses == ["missing-ref"]
+    # A call that files nothing must not create an empty collection.
+    assert getattr(fake_api, "created_collections", []) == []
+
+
 def test_unfile_by_refs_drops_only_that_membership(fake_api):
     fake_api.existing_collections.append(
         {"key": "TOPIC", "data": {"name": "Topical"}}

@@ -215,12 +215,14 @@ def file_by_refs(
 ) -> tuple[list[str], list[str]]:
     """File queue items into a collection (created on demand).
 
-    Matching is the same exact-only logic as removal. Returns (filed
+    Matching is the same exact-only logic as removal. The collection is
+    created only once at least one ref matches — a call that files
+    nothing leaves no phantom empty collection behind. Returns (filed
     titles, refs that matched nothing).
     """
-    key = collection_key(collection_name, create=True)
     items = _queue_items()
     filed, misses = [], []
+    key: str | None = None
     for ref in refs:
         match = next(
             (item for item in items if _ref_matches(ref, item["data"])),
@@ -229,6 +231,8 @@ def file_by_refs(
         if match is None:
             misses.append(ref)
             continue
+        if key is None:
+            key = collection_key(collection_name, create=True)
         if key:
             _add_to_collection(match, key)
         filed.append(match["data"].get("title", match["key"]))

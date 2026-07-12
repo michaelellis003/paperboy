@@ -733,6 +733,8 @@ def test_file_papers_tool(env, zotero_ok, monkeypatch):
     assert "Filed 1 item(s) under 'Bayesian Methods'" in receipt
     assert "Paper A" in receipt
     assert "Not found in queue: nope" in receipt
+    # unresolved refs get a next-step, not just an error
+    assert "queue_papers" in receipt
 
 
 def test_queue_papers_files_into_collections(

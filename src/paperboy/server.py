@@ -610,7 +610,8 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
             zotero_client.mark_no_pdf(item_key)
             no_pdf.append(paper.title)
     if not resolved:
-        return "Nothing was queued. " + "; ".join(problems)
+        reason = "; ".join(problems) if problems else "no valid refs given"
+        return f"Nothing was queued: {reason}"
     queue = settings().reading_queue_collection
     parts = [f"Queued {len(new)} new paper(s) in '{queue}'"]
     if collections:
@@ -646,11 +647,16 @@ def list_collections() -> list[dict]:
 
 @mcp.tool
 def file_papers(refs: list[str], collection: str) -> str:
-    """File queued papers into a Zotero collection (created if missing).
+    """File already-queued papers into a Zotero collection.
 
-    Items stay in the Reading Queue — Zotero items can live in many
-    collections — so delivery state is unaffected. Refs match like
-    remove_from_queue: exact arXiv id, DOI, URL, or title.
+    Only papers ALREADY in the Reading Queue can be filed — to file a
+    fresh paper, queue_papers it first, or pass collections=[...] to
+    queue_papers to queue and file in one step. The collection is
+    created on demand, but only if at least one paper matches (a call
+    that files nothing leaves no empty collection behind). Items stay
+    in the queue — Zotero items can live in many collections — so
+    delivery state is unaffected. Refs match like remove_from_queue:
+    exact arXiv id, DOI, URL, or title.
     """
     zotero_client.ensure_configured()
     if not collection.strip():
@@ -660,7 +666,11 @@ def file_papers(refs: list[str], collection: str) -> str:
     if filed:
         receipt += ": " + "; ".join(filed)
     if misses:
-        receipt += f" | Not found in queue: {'; '.join(misses)}"
+        receipt += (
+            f" | Not found in queue: {'; '.join(misses)} — filing only "
+            "works on queued papers, so queue_papers these first (or use "
+            "queue_papers with collections=[...] to queue and file at once)"
+        )
     return receipt
 
 
