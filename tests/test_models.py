@@ -1,4 +1,4 @@
-from paperboy.models import Paper, clean_title
+from paperboy.models import Paper, biorxiv_pdf_urls, clean_title
 
 
 def test_clean_title_strips_markup_and_spacing():
@@ -24,3 +24,40 @@ def test_paper_cleans_title_for_every_source():
         doi="10.1103/RevModPhys.82.3045",
     )
     assert paper.title == "Colloquium: Topological insulators"
+
+
+def test_biorxiv_doi_gets_pdf_url_when_oa_index_is_blank():
+    # bioRxiv is open by definition; a missing OA record must not leave
+    # the paper flagged as having no PDF (round-7 false negative).
+    paper = Paper(
+        title="A preprint",
+        authors=["A"],
+        abstract="x",
+        published="2021",
+        url="https://doi.org/10.1101/2021.06.11.448104",
+        pdf_url=None,
+        doi="10.1101/2021.06.11.448104",
+    )
+    assert paper.pdf_url == (
+        "https://www.biorxiv.org/content/10.1101/2021.06.11.448104.full.pdf"
+    )
+
+
+def test_non_preprint_doi_stays_without_pdf_url():
+    paper = Paper(
+        title="A paywalled paper",
+        authors=["A"],
+        abstract="x",
+        published="2020",
+        url="https://doi.org/10.1126/science.1125572",
+        pdf_url=None,
+        doi="10.1126/science.1125572",
+    )
+    assert paper.pdf_url is None
+
+
+def test_biorxiv_pdf_urls_helper():
+    assert biorxiv_pdf_urls("10.1038/x") == []
+    assert biorxiv_pdf_urls(None) == []
+    urls = biorxiv_pdf_urls("10.1101/abc")
+    assert "biorxiv.org" in urls[0] and "medrxiv.org" in urls[1]

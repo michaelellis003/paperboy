@@ -25,6 +25,24 @@ def clean_title(text: str) -> str:
     return " ".join(stripped.split())
 
 
+def biorxiv_pdf_urls(doi: str | None) -> list[str]:
+    """Deterministic PDF URLs for a bioRxiv/medRxiv (10.1101) DOI.
+
+    These preprint servers are open access by definition, but the OA
+    index (Unpaywall/OpenAlex) has spotty coverage of them. The PDF
+    lives at a DOI-derived path that redirects to the latest version.
+    The two servers share the 10.1101 prefix and can't be told apart
+    from the DOI, so both hosts are returned; the download path tries
+    each and verifies the payload is a real PDF.
+    """
+    if not doi or not doi.startswith("10.1101/"):
+        return []
+    return [
+        f"https://www.biorxiv.org/content/{doi}.full.pdf",
+        f"https://www.medrxiv.org/content/{doi}.full.pdf",
+    ]
+
+
 @dataclass
 class Paper:
     """Metadata for a resolvable paper.
@@ -47,6 +65,14 @@ class Paper:
         # OpenAlex, Semantic Scholar) is covered and none can leak the
         # <i>...</i> markup that publisher metadata carries.
         self.title = clean_title(self.title)
+        # bioRxiv/medRxiv preprints are open by definition; when the OA
+        # index has no record, fall back to their deterministic PDF URL
+        # so the paper isn't wrongly reported as having no open-access
+        # PDF. Every source that omits a pdf_url gets this uniformly.
+        if self.pdf_url is None:
+            fallbacks = biorxiv_pdf_urls(self.doi)
+            if fallbacks:
+                self.pdf_url = fallbacks[0]
 
     @property
     def safe_filename(self) -> str:

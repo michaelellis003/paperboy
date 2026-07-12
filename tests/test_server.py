@@ -733,6 +733,28 @@ def test_queue_papers_tags_no_pdf_at_queue_time(
     assert "no open-access PDF (won't be auto-sent)" in receipt
 
 
+def test_queue_papers_biorxiv_not_flagged_no_pdf(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    # A bioRxiv DOI whose OA index is blank still gets a PDF URL from
+    # the model, so it must NOT be tagged no-OA (round-7 false negative).
+    tagged = []
+    biorxiv = paper_factory(
+        pdf_url=None, arxiv_id=None, doi="10.1101/2021.06.11.448104"
+    )
+    assert biorxiv.pdf_url is not None  # model populated the fallback
+    monkeypatch.setattr(resolver, "resolve", lambda ref: biorxiv)
+    monkeypatch.setattr(
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "created"),
+    )
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
+    receipt = server.queue_papers(["10.1101/2021.06.11.448104"])
+    assert tagged == []
+    assert "no open-access PDF" not in receipt
+
+
 def test_queue_papers_fails_fast_without_zotero(env, monkeypatch):
     def explode(ref):
         raise AssertionError("resolver must not be called")
@@ -762,6 +784,20 @@ def test_file_papers_tool(env, zotero_ok, monkeypatch):
     assert "Paper A" in receipt
     assert "Not found in queue: nope" in receipt
     # unresolved refs get a next-step, not just an error
+    assert "queue_papers" in receipt
+
+
+def test_file_papers_nothing_matched_does_not_imply_collection(
+    env, zotero_ok, monkeypatch
+):
+    # A phantom-name file with no matches must not read as if the
+    # collection now exists ("Filed 0 ... under 'X'").
+    monkeypatch.setattr(
+        zotero_client, "file_by_refs", lambda refs, name: ([], ["nope"])
+    )
+    receipt = server.file_papers(["nope"], "Phantom Topic")
+    assert "Filed 0" not in receipt
+    assert "'Phantom Topic' was not created" in receipt
     assert "queue_papers" in receipt
 
 

@@ -13,7 +13,7 @@ import difflib
 
 import httpx
 
-from . import arxiv, doi, openalex
+from . import arxiv, doi, models, openalex
 from .models import Paper, normalize_title
 from .net import client
 
@@ -96,15 +96,9 @@ def _candidate_pdf_urls(paper: Paper) -> list[str]:
         fallback = f"https://arxiv.org/pdf/{paper.arxiv_id}"
         if fallback not in urls:
             urls.append(fallback)
-    if paper.doi and paper.doi.startswith("10.1101/"):
-        # bioRxiv and medRxiv share the 10.1101 prefix and serve the PDF
-        # at a DOI-derived path that redirects to the latest version.
-        # We can't tell the two apart from the DOI, so offer both hosts;
-        # the wrong one 404s and is skipped by the PDF-verifying download.
-        for host in ("www.biorxiv.org", "www.medrxiv.org"):
-            fallback = f"https://{host}/content/{paper.doi}.full.pdf"
-            if fallback not in urls:
-                urls.append(fallback)
+    for fallback in models.biorxiv_pdf_urls(paper.doi):
+        if fallback not in urls:
+            urls.append(fallback)
     return urls
 
 

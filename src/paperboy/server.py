@@ -678,16 +678,22 @@ def file_papers(refs: list[str], collection: str) -> str:
     if not collection.strip():
         return "Nothing filed: the collection name must be non-empty."
     filed, misses = zotero_client.file_by_refs(refs, collection)
-    receipt = f"Filed {len(filed)} item(s) under '{collection}'"
+    # When nothing matched, the collection was intentionally not created,
+    # so don't phrase the receipt as if it exists ("Filed 0 under 'X'").
     if filed:
-        receipt += ": " + "; ".join(filed)
+        parts = [
+            f"Filed {len(filed)} item(s) under '{collection}': "
+            + "; ".join(filed)
+        ]
+    else:
+        parts = [f"Nothing filed; '{collection}' was not created"]
     if misses:
-        receipt += (
-            f" | Not found in queue: {'; '.join(misses)} — filing only "
+        parts.append(
+            f"Not found in queue: {'; '.join(misses)} — filing only "
             "works on queued papers, so queue_papers these first (or use "
             "queue_papers with collections=[...] to queue and file at once)"
         )
-    return receipt
+    return " | ".join(parts)
 
 
 @mcp.tool
