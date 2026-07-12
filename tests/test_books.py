@@ -391,3 +391,15 @@ def test_title_arm_skips_google_after_confident_openlibrary_match(
 
     use_client(monkeypatch, handler)
     assert books.resolve_book("Graphical Models").title == "Graphical Models"
+
+
+def test_isbn_label_with_space_before_digits_normalizes():
+    assert books.normalize_isbn("ISBN 10: 0-306-40615-2") == WP_ISBN13
+    assert books.normalize_isbn("ISBN 13 978-0-306-40615-7") == WP_ISBN13
+
+
+def test_isbn_label_regex_does_not_eat_number_digits():
+    # "13"/"10" directly attached to the number belong to the NUMBER;
+    # stripping them would corrupt a legitimate ISBN.
+    assert books._clean_isbn("ISBN-1306406152") == "1306406152"
+    assert books._clean_isbn("ISBN 1078454220") == "1078454220"

@@ -87,11 +87,27 @@ class FakeZotero:
     def add_tags(self, item, tag):
         self.tagged.append((item["key"], tag))
 
+    def _check_version(self, item_key, sent_version):
+        # Mirror the Zotero API's If-Unmodified-Since-Version: every
+        # write bumps the item's version, and a later write carrying a
+        # stale version fails with 412. Sequential addto_collection
+        # calls on one stale dict were failing in production while a
+        # version-blind fake passed them.
+        self.server_versions = getattr(self, "server_versions", {})
+        current = self.server_versions.get(item_key, sent_version)
+        if sent_version != current:
+            raise ValueError(
+                f"412 Precondition Failed: stale version for {item_key}"
+            )
+        self.server_versions[item_key] = current + 1
+
     def addto_collection(self, key, item):
-        # Mirror pyzotero: addto_collection PATCHes the server and does
+        # Mirror pyzotero: PATCHes the server (version-guarded) and does
         # NOT mutate the passed item dict. Code that wants post-filing
         # membership must track it itself; a fake that mutated in place
         # masked exactly that bug. The PATCH is recorded for asserting.
+        sent = item.get("version") or item["data"].get("version") or 0
+        self._check_version(item["key"], sent)
         self.collection_adds = getattr(self, "collection_adds", [])
         self.collection_adds.append((key, item["key"]))
 
@@ -112,8 +128,14 @@ class FakeZotero:
         for key in payload:
             if key not in base and key not in self.temp_keys:
                 raise ValueError(f"Invalid keys present in item: {key}")
+        self._check_version(payload["key"], payload.get("version") or 0)
         self.updated = getattr(self, "updated", [])
         self.updated.append(payload["key"])
+        if "collections" in payload:
+            self.collection_writes = getattr(self, "collection_writes", [])
+            self.collection_writes.append(
+                (payload["key"], list(payload["collections"]))
+            )
         if payload.get("deleted"):
             self.trashed = getattr(self, "trashed", [])
             self.trashed.append(payload["key"])
@@ -522,8 +544,8 @@ def test_requeue_of_kept_item_rejoins_queue(fake_api, paper_factory):
     fake_api.library_items = [kept]
     key, status = zotero_client.add_paper(paper_factory())
     assert (key, status) == ("KEPT", "requeued")
-    # rejoined the queue collection, no duplicate record created
-    assert ("COLL", "KEPT") in fake_api.collection_adds
+    # rejoined the queue collection (one union write), no duplicate
+    assert ("KEPT", ["TOPICAL", "COLL"]) in fake_api.collection_writes
     assert fake_api.created == []
 
 
@@ -605,9 +627,9 @@ def test_add_existing_paper_gains_collections(fake_api, paper_factory):
         paper_factory(), collections=["Topical"]
     )
     assert (key, status) == ("EXISTING", "already_queued")
-    # Filed into the new topical collection; already in the queue, so
-    # no queue re-add is PATCHed.
-    assert fake_api.collection_adds == [("NEWCOLL", "EXISTING")]
+    # One union write files it into the new topical collection while
+    # keeping the existing queue membership.
+    assert fake_api.collection_writes == [("EXISTING", ["COLL", "NEWCOLL"])]
 
 
 def test_file_by_refs(fake_api):
@@ -1083,3 +1105,97 @@ def test_receipt_names_degrade_on_zotero_failure(fake_api, monkeypatch):
 
     monkeypatch.setattr(zotero_client, "_collections_raw", boom)
     assert zotero_client._receipt_names(["COLL"]) == []
+
+
+# --- round-A fixes -------------------------------------------------------
+
+
+def test_multi_collection_filing_is_one_versioned_write(
+    fake_api, paper_factory
+):
+    # Two sequential addto_collection calls on one stale dict 412
+    # against the real API; filing into several collections must be a
+    # single union write. The fake's version check enforces this.
+    fake_api.existing_collections += [
+        {"key": "T1", "data": {"name": "Theory"}},
+        {"key": "T2", "data": {"name": "ML"}},
+    ]
+    fake_api.library_items = [
+        {
+            "key": "EX",
+            "version": 7,
+            "data": {
+                "itemType": "journalArticle",
+                "DOI": "10.1/x",
+                "title": "A Test Paper",
+                "collections": [],
+            },
+        }
+    ]
+    _, status, names = zotero_client.catalog_paper(
+        paper_factory(arxiv_id=None, doi="10.1/x"),
+        collections=["Theory", "ML"],
+    )
+    assert status == "existing"
+    assert names == ["Theory", "ML"]
+    assert fake_api.collection_writes == [("EX", ["T1", "T2"])]
+
+
+def test_filing_nothing_new_writes_nothing(fake_api, paper_factory):
+    # An item already in every requested collection must not be PATCHed
+    # at all — a no-op write still bumps versions and burns quota.
+    fake_api.library_items = [
+        {
+            "key": "EX",
+            "data": {
+                "itemType": "journalArticle",
+                "DOI": "10.1/x",
+                "title": "A Test Paper",
+                "collections": [],
+            },
+        }
+    ]
+    _, status, _ = zotero_client.catalog_paper(
+        paper_factory(arxiv_id=None, doi="10.1/x")
+    )
+    assert status == "existing"
+    assert getattr(fake_api, "collection_writes", []) == []
+
+
+def test_book_isbn_field_with_internal_spaces_dedups(fake_api):
+    # A single ISBN written with internal spaces ("978 0 306 40615 7")
+    # must dedup — tokenizing alone would shred it into invalid pieces.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "ISBN": "978 0 306 40615 7",
+                "title": "Something",
+                "collections": [],
+            },
+        }
+    ]
+    book = Book(title="Something", authors=[], isbn="9780306406157")
+    key, status, _ = zotero_client.add_book(book)
+    assert (key, status) == ("BK", "existing")
+
+
+def test_book_isbn_matches_any_stored_token(fake_api):
+    # MARC records repeat 020 for hbk/pbk/ebook ISBNs; the incoming
+    # ISBN may match any of them, not just the first.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "ISBN": "9781470421991 9780306406157",
+                "title": "Something",
+                "collections": [],
+            },
+        }
+    ]
+    book = Book(title="Something", authors=[], isbn="9780306406157")
+    key, status, _ = zotero_client.add_book(book)
+    assert (key, status) == ("BK", "existing")
+    assert fake_api.created == []

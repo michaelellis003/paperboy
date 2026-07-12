@@ -173,12 +173,37 @@ def _add_to_collection(item: dict, key: str) -> None:
         _api().addto_collection(key, item)
 
 
+def _add_to_collections(item: dict, keys: list[str]) -> list[str]:
+    """File an item into several collections with ONE write.
+
+    pyzotero's addto_collection PATCHes a body built from the passed
+    (stale) dict, guarded by If-Unmodified-Since-Version — so a second
+    sequential call for the same item fails with 412 (or would lose the
+    first add). Building the membership union locally and writing once
+    sidesteps the conflict. Returns the post-write membership keys.
+    """
+    current = item["data"].get("collections", [])
+    union = list(current)
+    for key in keys:
+        if key and key not in union:
+            union.append(key)
+    if union == list(current):
+        return union
+    version = item.get("version") or item["data"].get("version")
+    _api().update_item(
+        {"key": item["key"], "version": version, "collections": union}
+    )
+    return union
+
+
 def file_item(item: dict, collections: list[str] | None) -> None:
     """File an existing item into named collections (created on demand)."""
-    for name in collections or []:
-        key = collection_key(name, create=True)
-        if key:
-            _add_to_collection(item, key)
+    keys = [
+        key
+        for name in collections or []
+        if (key := collection_key(name, create=True))
+    ]
+    _add_to_collections(item, keys)
 
 
 def _creator_type(template: dict) -> str:
@@ -276,16 +301,16 @@ def _upsert_paper(
 
     existing = find_item(paper)
     if existing:
-        # pyzotero's addto_collection PATCHes the server and does NOT
-        # mutate the passed item dict, so track the post-filing
-        # membership ourselves rather than re-reading the stale dict.
-        member_keys = list(existing["data"].get("collections", []))
-        was_queued = bool(queue_key and queue_key in member_keys)
-        for key in ([queue_key] if queue_key else []) + extra_keys:
-            if key:
-                _add_to_collection(existing, key)
-                if key not in member_keys:
-                    member_keys.append(key)
+        was_queued = bool(
+            queue_key and queue_key in existing["data"].get("collections", [])
+        )
+        # One write for all additions (see _add_to_collections); it
+        # returns the post-filing membership, which pyzotero would not
+        # reflect in the passed dict.
+        member_keys = _add_to_collections(
+            existing,
+            [k for k in [queue_key, *extra_keys] if k],
+        )
         if not queue:
             return existing["key"], "existing", _receipt_names(member_keys)
         # Distinguish a true no-op (already queued) from an item pulled
@@ -337,21 +362,29 @@ def catalog_paper(
     return _upsert_paper(paper, collections, queue=False)
 
 
-def _book_isbn(data: dict[str, Any]) -> str | None:
-    """First valid ISBN in the item's ISBN field, normalized to ISBN-13.
+def _book_isbns(data: dict[str, Any]) -> set[str]:
+    """Every valid ISBN in the item's ISBN field, normalized to ISBN-13.
 
-    Zotero's field is free text and translators (MARC especially) store
-    several ISBNs in it, space- or comma-separated — normalizing the
-    whole field would concatenate them into garbage and silently break
-    dedup, so each token is tried on its own.
+    Zotero's field is free text: translators (MARC especially) store
+    several ISBNs space- or comma-separated (hbk/pbk/ebook of one
+    record), and single ISBNs are sometimes written with internal
+    spaces ("978 0 306 40615 7"). So the whole field is tried first,
+    then each token — and ALL results count, because the incoming ISBN
+    may match any of the stored ones.
     """
     raw = data.get("ISBN", "")
+    if not raw:
+        return set()
+    isbns = set()
+    whole = normalize_isbn(raw)
+    if whole:
+        isbns.add(whole)
     for token in re.split(r"[,;\s]+", raw):
         if token:
             isbn = normalize_isbn(token)
             if isbn:
-                return isbn
-    return None
+                isbns.add(isbn)
+    return isbns
 
 
 def _matches_book(book: Book, data: dict[str, Any]) -> bool:
@@ -364,9 +397,9 @@ def _matches_book(book: Book, data: dict[str, Any]) -> bool:
     """
     if data.get("itemType") != "book":
         return False
-    stored_isbn = _book_isbn(data)
-    if book.isbn or stored_isbn:
-        return bool(book.isbn and stored_isbn and book.isbn == stored_isbn)
+    stored_isbns = _book_isbns(data)
+    if book.isbn or stored_isbns:
+        return bool(book.isbn and book.isbn in stored_isbns)
     title = data.get("title", "")
     return bool(title and normalize_title(book.title) == normalize_title(title))
 
@@ -432,13 +465,9 @@ def add_book(
     kept_keys = [k for k in extra_keys if k]
     existing = find_book(book)
     if existing:
-        # Track post-filing membership ourselves: pyzotero PATCHes the
-        # server without mutating the passed dict (see _upsert_paper).
-        member_keys = list(existing["data"].get("collections", []))
-        for key in kept_keys:
-            _add_to_collection(existing, key)
-            if key not in member_keys:
-                member_keys.append(key)
+        # One write for all additions; returns post-filing membership
+        # (pyzotero would not reflect it in the passed dict).
+        member_keys = _add_to_collections(existing, kept_keys)
         return existing["key"], "existing", _receipt_names(member_keys)
     result = api.create_items([_book_template(book, kept_keys)])
     if result["failed"]:
@@ -475,7 +504,11 @@ def find_attach_target(item_type: str, title: str) -> dict | None:
     """
     api = _api()
     wanted = normalize_title(title)
-    for item in api.items(q=title, qmode="everything", limit=25):
+    # titleCreatorYear mode searches titles rather than full text, so a
+    # generic title can't drown the target past the fetch limit (a miss
+    # here degrades to a duplicate item — the exact failure reuse is
+    # supposed to prevent).
+    for item in api.items(q=title, qmode="titleCreatorYear", limit=50):
         data = item.get("data", {})
         if data.get("itemType") == item_type and wanted == normalize_title(
             data.get("title", "")
@@ -512,8 +545,7 @@ def attach_pdf_item(
 
     existing = find_attach_target(item_type, title)
     if existing:
-        for key in kept_keys:
-            _add_to_collection(existing, key)
+        _add_to_collections(existing, kept_keys)
         return (
             existing["key"],
             "existing",

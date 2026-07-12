@@ -27,8 +27,12 @@ _TITLE_MATCH_THRESHOLD = 0.8
 _ISBN_CHARS = re.compile(r"[^0-9Xx]")
 # "ISBN-13: 978-..." is the exact labeled format on retail/publisher
 # pages. The digits in "-13"/"-10" would survive character cleaning and
-# corrupt the number, so the label is stripped as a unit first.
-_ISBN_LABEL = re.compile(r"^\s*ISBN(?:-?1[03])?\s*:?\s*", re.IGNORECASE)
+# corrupt the number, so the label is stripped as a unit first. The
+# lookahead keeps the 10/13 only when a separator follows — "ISBN 10:"
+# is a label, but in "ISBN-1306406152" the 13 belongs to the number.
+_ISBN_LABEL = re.compile(
+    r"^\s*ISBN(?:[-\s]?1[03](?=[\s:]))?\s*:?\s*", re.IGNORECASE
+)
 
 
 def _clean_isbn(raw: str) -> str:
