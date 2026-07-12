@@ -10,13 +10,17 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from pyzotero import zotero
+from pyzotero import zotero, zotero_errors
 
 from . import arxiv, doi
 from .config import settings
 from .models import Paper, normalize_title
 
 NO_PDF_TAG = "no-oa-pdf"
+
+
+class ZoteroUnavailableError(RuntimeError):
+    """Zotero could not be reached — transient, worth retrying."""
 
 
 def ensure_configured() -> None:
@@ -227,17 +231,24 @@ def scholarly_ref_for_key(ref: str) -> str | None:
     backends, which know nothing about Zotero keys — this bridge keeps
     the promise that a key from list_queue works in every ref-taking
     tool. Returns None when the ref isn't key-shaped, Zotero is off,
-    or no such item exists (so ordinary resolution proceeds).
+    or no such item exists (so ordinary resolution proceeds). Raises
+    ZoteroUnavailableError when Zotero itself can't be reached: a valid key
+    must not read as "could not resolve" during a transient outage.
     """
-    candidate = ref.strip()
+    candidate = ref.strip().upper()
     if not _ITEM_KEY.fullmatch(candidate):
         return None
     if not settings().zotero_enabled:
         return None
     try:
         item = _api().item(candidate)
-    except Exception:
-        return None  # fall through to ordinary resolution
+    except zotero_errors.ResourceNotFoundError:
+        return None  # genuinely no such item — ordinary resolution
+    except Exception as exc:
+        raise ZoteroUnavailableError(
+            f"Zotero is temporarily unreachable while looking up item "
+            f"key {candidate} — retry"
+        ) from exc
     data = item.get("data", {})
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
@@ -255,10 +266,11 @@ def _matching_items(ref: str, items: list[dict]) -> list[dict]:
     needle = ref.strip()
     if not needle:
         return []
+    key_form = needle.upper()  # keys are uppercase; accept any casing
     return [
         item
         for item in items
-        if item.get("key") == needle or _ref_matches(ref, item["data"])
+        if item.get("key") == key_form or _ref_matches(ref, item["data"])
     ]
 
 

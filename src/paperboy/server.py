@@ -372,7 +372,11 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
         # receipts) names a library item, not a scholarly record —
         # translate it to the item's own id before resolving.
         if settings().zotero_enabled:
-            from_key = zotero_client.scholarly_ref_for_key(ref)
+            try:
+                from_key = zotero_client.scholarly_ref_for_key(ref)
+            except zotero_client.ZoteroUnavailableError as exc:
+                problems.append(str(exc))
+                continue
             if from_key:
                 ref = from_key
         try:
@@ -513,6 +517,9 @@ def send_papers(
     Relay the full receipt — sizes, skips, and failures — to the user.
     """
     collections, collection_note = _clean_collections(collections)
+    refs, blank_note = _drop_blank_refs(refs)
+    if blank_note:
+        collection_note += f" | {blank_note}"
     resolved, problems = _resolve_all(refs)
 
     already_sent: list[Paper] = []
@@ -571,6 +578,10 @@ def send_papers(
                 + "; ".join(p.title for p in already_sent)
             )
         parts.extend(problems)
+        if collections and settings().zotero_enabled:
+            parts.append(
+                "a real send would also file under: " + "; ".join(collections)
+            )
         return (
             " | ".join(parts)
             + collection_note
@@ -672,6 +683,9 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
     """
     zotero_client.ensure_configured()
     collections, collection_note = _clean_collections(collections)
+    refs, blank_note = _drop_blank_refs(refs)
+    if blank_note:
+        collection_note += f" | {blank_note}"
     resolved, problems = _resolve_all(refs)
     new, requeued, already, no_pdf = [], [], [], []
     bucket = {"created": new, "requeued": requeued, "already_queued": already}
@@ -941,9 +955,22 @@ def send_queue() -> str:
             continue
         try:
             content = resolver.download_pdf(paper)
-        except (ValueError, httpx.HTTPError):
+        except httpx.HTTPError:
+            # Transient transport failure: the PDF may be fine, so the
+            # item stays unsent and the next send_queue retries it.
+            # Tagging it no-oa-pdf here would silently drop a perfectly
+            # available paper from auto-send forever.
+            skipped.append(
+                f"{title} (download failed — left unsent, the next "
+                "send_queue will retry)"
+            )
+            continue
+        except ValueError:
+            # Deterministic: every candidate URL served junk (HTML
+            # anti-bot pages, dead links) — retrying forever won't fix
+            # it, so tag it for manual delivery.
             zotero_client.mark_no_pdf(item["key"])
-            skipped.append(f"{title} (PDF download failed — won't retry)")
+            skipped.append(f"{title} (no usable open-access PDF — won't retry)")
             continue
         downloaded.append((item["key"], paper.safe_filename, content))
 

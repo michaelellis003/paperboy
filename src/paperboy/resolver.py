@@ -114,8 +114,10 @@ def _candidate_pdf_urls(paper: Paper) -> list[str]:
 def download_pdf(paper: Paper) -> bytes:
     """Download the paper's PDF, falling back to arXiv on dead links.
 
-    Raises ValueError with the underlying cause when no candidate URL
-    works.
+    Raises ValueError when failure is deterministic (no candidate URL,
+    or every URL served non-PDF junk); re-raises the httpx error when
+    the last failure was transport-level, so callers can leave the
+    paper unsent for retry instead of writing it off as PDF-less.
     """
     urls = _candidate_pdf_urls(paper)
     if not urls:
@@ -138,6 +140,15 @@ def download_pdf(paper: Paper) -> bytes:
             )
             continue
         return response.content
+    if isinstance(last_error, httpx.HTTPStatusError):
+        status = last_error.response.status_code
+        if status in (408, 429) or status >= 500:
+            raise last_error
+    elif isinstance(last_error, httpx.HTTPError):
+        # Transport-level (timeout, DNS, reset): transient by nature.
+        raise last_error
+    # Deterministic: dead links (404) or non-PDF payloads on every
+    # candidate URL — retrying won't change the outcome.
     raise ValueError(
         f"Could not download PDF for {paper.title!r}: {last_error}"
     )

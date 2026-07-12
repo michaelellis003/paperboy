@@ -1251,6 +1251,104 @@ def test_send_queue_mixed_items(
     assert "Paywalled (no open-access PDF — won't retry)" in receipt
 
 
+def test_send_queue_transient_download_failure_is_not_tagged(
+    env, monkeypatch, paper_factory, sent_documents
+):
+    # A network blip must not permanently tag a paper no-oa-pdf and
+    # drop it from auto-send — it stays unsent for the next run.
+    items = [{"key": "BLIP", "data": {"url": "https://arxiv.org/abs/1.1"}}]
+    monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)
+    tagged = []
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        resolver,
+        "download_pdf",
+        lambda paper: (_ for _ in ()).throw(httpx.ConnectTimeout("blip")),
+    )
+    receipt = server.send_queue()
+    assert tagged == []
+    assert "left unsent" in receipt and "will retry" in receipt
+
+
+def test_send_queue_junk_pdf_is_tagged(
+    env, monkeypatch, paper_factory, sent_documents
+):
+    # Deterministic junk (every URL served non-PDF content) IS tagged,
+    # so send_queue doesn't retry it forever.
+    items = [{"key": "JUNK", "data": {"url": "https://arxiv.org/abs/1.2"}}]
+    monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)
+    tagged = []
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        resolver,
+        "download_pdf",
+        lambda paper: (_ for _ in ()).throw(ValueError("non-PDF content")),
+    )
+    receipt = server.send_queue()
+    assert tagged == ["JUNK"]
+    assert "won't retry" in receipt
+
+
+def test_download_pdf_reraises_transient_transport_errors(
+    monkeypatch, paper_factory
+):
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: (_ for _ in ()).throw(
+                    httpx.ConnectTimeout("boom", request=r)
+                )
+            )
+        ),
+    )
+    with pytest.raises(httpx.ConnectTimeout):
+        resolver.download_pdf(paper_factory())
+
+
+def test_resolve_all_zotero_outage_is_transient(
+    zotero_env, monkeypatch, paper_factory
+):
+    def unavailable(ref):
+        raise zotero_client.ZoteroUnavailableError(
+            "Zotero is temporarily unreachable while looking up item "
+            "key ABCD1234 — retry"
+        )
+
+    monkeypatch.setattr(zotero_client, "scholarly_ref_for_key", unavailable)
+    resolved, problems = server._resolve_all(["ABCD1234"])
+    assert resolved == []
+    assert "temporarily unreachable" in problems[0]
+    assert "could not resolve" not in problems[0].lower()
+
+
+def test_send_papers_drops_blank_refs(env, monkeypatch, paper_factory):
+    seen = []
+
+    def fake_resolve(ref):
+        seen.append(ref)
+        return paper_factory(pdf_url=None)
+
+    monkeypatch.setattr(resolver, "resolve", fake_resolve)
+    receipt = server.send_papers(["  ", "2401.12345"], dry_run=True)
+    assert seen == ["2401.12345"]
+    assert "ignored empty ref(s)" in receipt
+
+
+def test_dry_run_mentions_pending_filing(
+    zotero_env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(resolver, "probe_pdf_size", lambda paper: 2_000_000)
+    receipt = server.send_papers(
+        ["2401.12345"], dry_run=True, collections=["Topic"]
+    )
+    assert "a real send would also file under: Topic" in receipt
+
+
 def test_send_queue_nothing_deliverable(env, monkeypatch):
     items = [{"key": "X", "data": {"title": "Unfindable"}}]
     monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)

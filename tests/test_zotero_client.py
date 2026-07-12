@@ -689,8 +689,32 @@ def test_scholarly_ref_for_unknown_key_returns_none(fake_api, env, monkeypatch):
     env.setenv("ZOTERO_LIBRARY_ID", "1")
     env.setattr(paperboy.config, "_settings", None)
 
-    def boom(key):
-        raise RuntimeError("404")
+    from pyzotero import zotero_errors
 
-    monkeypatch.setattr(fake_api, "item", boom)
+    def missing(key):
+        raise zotero_errors.ResourceNotFoundError("no such item")
+
+    monkeypatch.setattr(fake_api, "item", missing)
     assert zotero_client.scholarly_ref_for_key("NOTAKEY1") is None
+
+
+def test_scholarly_ref_outage_raises_transient(fake_api, env, monkeypatch):
+    import paperboy.config
+
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    env.setattr(paperboy.config, "_settings", None)
+
+    def outage(key):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(fake_api, "item", outage)
+    with pytest.raises(zotero_client.ZoteroUnavailableError, match="retry"):
+        zotero_client.scholarly_ref_for_key("NOTAKEY1")
+
+
+def test_matching_items_accepts_lowercase_key(fake_api):
+    fake_api.queue = [{"key": "IMJQVDDX", "data": {"title": "T"}}]
+    removed, misses, _ = zotero_client.remove_by_refs(["imjqvddx"])
+    assert [e["title"] for e in removed] == ["T"]
+    assert misses == []
