@@ -93,6 +93,43 @@ def test_unresolvable_ref_raises(monkeypatch):
         resolver.resolve("my cool paper")
 
 
+def test_title_backend_failure_is_not_could_not_resolve(
+    monkeypatch, paper_factory
+):
+    # An OpenAlex 429 must surface as a transient error, not read as
+    # "this title is wrong" — the receipts route HTTP errors to a
+    # "temporarily unreachable — retry" message.
+    request = httpx.Request("GET", "https://api.openalex.org/works")
+
+    def throttled(q, max_results):
+        raise httpx.HTTPStatusError(
+            "429",
+            request=request,
+            response=httpx.Response(429, request=request),
+        )
+
+    monkeypatch.setattr(openalex, "search", throttled)
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(httpx.HTTPStatusError):
+        resolver.resolve("Denoising Diffusion Probabilistic Models")
+
+
+def test_title_backend_failure_recovered_by_arxiv_arm(
+    monkeypatch, paper_factory
+):
+    # When arXiv still finds a confident match, an OpenAlex outage is
+    # irrelevant and resolution succeeds.
+    wanted = paper_factory(title="A Very Specific Preprint Title")
+
+    def down(q, max_results):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(openalex, "search", down)
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [wanted])
+    monkeypatch.setattr(arxiv, "get_paper", lambda ref: wanted)
+    assert resolver.resolve("A Very Specific Preprint Title") is wanted
+
+
 def test_download_pdf(monkeypatch, paper_factory):
     monkeypatch.setattr(
         resolver,

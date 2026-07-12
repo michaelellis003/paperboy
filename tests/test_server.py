@@ -782,7 +782,7 @@ def test_file_papers_tool(env, zotero_ok, monkeypatch):
     monkeypatch.setattr(
         zotero_client,
         "file_by_refs",
-        lambda refs, name: (["Paper A"], ["nope"]),
+        lambda refs, name: (["Paper A"], ["nope"], []),
     )
     receipt = server.file_papers(["10.1/a", "nope"], "Bayesian Methods")
     assert "Filed 1 item(s) under 'Bayesian Methods'" in receipt
@@ -798,7 +798,7 @@ def test_file_papers_nothing_matched_does_not_imply_collection(
     # A phantom-name file with no matches must not read as if the
     # collection now exists ("Filed 0 ... under 'X'").
     monkeypatch.setattr(
-        zotero_client, "file_by_refs", lambda refs, name: ([], ["nope"])
+        zotero_client, "file_by_refs", lambda refs, name: ([], ["nope"], [])
     )
     receipt = server.file_papers(["nope"], "Phantom Topic")
     assert "Filed 0" not in receipt
@@ -935,12 +935,66 @@ def test_unfile_papers_tool(env, zotero_ok, monkeypatch):
     monkeypatch.setattr(
         zotero_client,
         "unfile_by_refs",
-        lambda refs, name: (["Paper A"], ["nope"]),
+        lambda refs, name: (["Paper A"], ["nope"], []),
     )
     receipt = server.unfile_papers(["10.1/a", "nope"], "Bayesian Methods")
     assert "Removed 1 item(s) from 'Bayesian Methods'" in receipt
     assert "Paper A" in receipt
     assert "Not found in that collection: nope" in receipt
+
+
+def test_file_papers_refuses_reading_queue_target(env, zotero_ok):
+    receipt = server.file_papers(["10.1/a"], "Reading Queue")
+    assert "Nothing filed" in receipt
+    assert "queue_papers" in receipt
+
+
+def test_unfile_papers_refuses_reading_queue_target(env, zotero_ok):
+    receipt = server.unfile_papers(["10.1/a"], "reading queue")
+    assert "Nothing removed" in receipt
+    assert "remove_from_queue" in receipt
+
+
+def test_file_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "file_by_refs",
+        lambda refs, name: (
+            [],
+            [],
+            [{"ref": "dup title", "candidates": ["KEY1", "KEY2"]}],
+        ),
+    )
+    receipt = server.file_papers(["dup title"], "Topic")
+    assert "NOT filed (ambiguous" in receipt
+    assert "KEY1, KEY2" in receipt
+
+
+def test_unfile_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "unfile_by_refs",
+        lambda refs, name: (
+            [],
+            [],
+            [{"ref": "dup title", "candidates": ["KEY1", "KEY2"]}],
+        ),
+    )
+    receipt = server.unfile_papers(["dup title"], "Topic")
+    assert "NOT removed (ambiguous" in receipt
+
+
+def test_remove_from_queue_ignores_blank_refs(env, monkeypatch):
+    seen = {}
+
+    def fake_remove(refs):
+        seen["refs"] = refs
+        return [], [], []
+
+    monkeypatch.setattr(zotero_client, "remove_by_refs", fake_remove)
+    receipt = server.remove_from_queue(["", "  ", "10.1/a"])
+    assert seen["refs"] == ["10.1/a"]
+    assert "ignored empty ref(s)" in receipt
 
 
 def test_unfile_papers_unknown_collection(env, zotero_ok, monkeypatch):

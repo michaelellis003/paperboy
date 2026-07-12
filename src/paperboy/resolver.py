@@ -8,7 +8,6 @@ the best hit closely matches the requested title — a wrong paper on
 the e-reader is worse than a lookup failure.
 """
 
-import contextlib
 import difflib
 
 import httpx
@@ -36,12 +35,22 @@ def _resolve_title(ref: str) -> Paper | None:
     # work first (e.g. Sentence-BERT above BERT for the exact BERT
     # title), and arXiv covers canonical records OpenAlex ranks poorly.
     hit = None
-    with contextlib.suppress(httpx.HTTPError):
+    backend_error: httpx.HTTPError | None = None
+    try:
         hit = _best_title_match(ref, openalex.search(ref, max_results=5))
+    except httpx.HTTPError as exc:
+        backend_error = exc
     if hit is None:
-        with contextlib.suppress(httpx.HTTPError):
+        try:
             hit = _best_title_match(ref, arxiv.search(ref, max_results=5))
+        except httpx.HTTPError as exc:
+            backend_error = backend_error or exc
     if hit is None:
+        # A failed search arm must not read as "this title is wrong":
+        # a 429 during an OpenAlex throttle would otherwise tell the
+        # user to go find a DOI when retrying in a minute would work.
+        if backend_error is not None:
+            raise backend_error
         return None
     # OpenAlex carries junk duplicate records (wrong DOI/date) for some
     # papers; when the hit is on arXiv, re-fetch canonical metadata so

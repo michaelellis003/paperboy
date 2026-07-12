@@ -74,8 +74,9 @@ def search_papers(
     arXiv-native topics) or 'arxiv' (arXiv's own search — better for
     recent preprints or when 'all' returns off-topic results); unknown
     values fall back to 'all'.
-    ``max_results`` is capped at 25. Each result has a ``ref`` (arXiv
-    id, DOI, or exact title) to pass to send_papers / queue_papers.
+    ``max_results`` is clamped to the 1-25 range. Each result has a ``ref``
+    (arXiv id, DOI, or exact title) to pass to send_papers /
+    queue_papers.
     ``open_access_pdf`` means an OA PDF link was found; delivery can
     still fail if the link is dead (arXiv-hosted papers are the most
     reliable).
@@ -292,6 +293,38 @@ def _clean_collections(
     return (cleaned or None), note
 
 
+def _drop_blank_refs(refs: list[str]) -> tuple[list[str], str]:
+    """Drop empty/whitespace refs; report when any were dropped.
+
+    A blank ref can never match, and letting it fall through renders
+    receipts oddly ("Not found in queue: ; Other Paper").
+    """
+    cleaned = [ref for ref in refs if ref.strip()]
+    note = "ignored empty ref(s)" if len(cleaned) < len(refs) else ""
+    return cleaned, note
+
+
+def _is_queue_collection(collection: str) -> bool:
+    """Whether a collection name refers to the Reading Queue itself."""
+    return (
+        collection.strip().lower()
+        == settings().reading_queue_collection.strip().lower()
+    )
+
+
+def _ambiguity_note(ambiguous: list[dict], verb: str) -> str:
+    """Render refused-as-ambiguous refs with their consumable ids."""
+    parts = [
+        f"{entry['ref']!r} matches {len(entry['candidates'])} items "
+        f"({', '.join(entry['candidates'])})"
+        for entry in ambiguous
+    ]
+    return (
+        f"NOT {verb} (ambiguous — ask the user which, then re-run "
+        f"with that id): {'; '.join(parts)}"
+    )
+
+
 def _collections_ignored_note(collections: list[str] | None) -> str:
     """Flag collections requested while Zotero is unconfigured."""
     if collections and not settings().zotero_enabled:
@@ -431,6 +464,8 @@ def send_papers(
     abs/pdf URLs, DOIs, doi.org URLs, and paper titles — the same
     ``ref`` values search and recommendation results carry. Publisher
     landing-page URLs are NOT resolvable — use the DOI or title.
+    Version suffixes ('2401.12345v2') are ignored; the latest arXiv
+    version is delivered.
     ``collections`` optionally files the papers into topical Zotero
     collections (created on demand) in addition to the Reading Queue —
     check list_collections and ask the user when placement is unclear.
@@ -681,7 +716,14 @@ def file_papers(refs: list[str], collection: str) -> str:
     zotero_client.ensure_configured()
     if not collection.strip():
         return "Nothing filed: the collection name must be non-empty."
-    filed, misses = zotero_client.file_by_refs(refs, collection)
+    if _is_queue_collection(collection):
+        return (
+            "Nothing filed: every paper here is already in the Reading "
+            "Queue — that membership is managed by queue_papers and "
+            "remove_from_queue."
+        )
+    refs, blank_note = _drop_blank_refs(refs)
+    filed, misses, ambiguous = zotero_client.file_by_refs(refs, collection)
     # When nothing matched, the collection was intentionally not created,
     # so don't phrase the receipt as if it exists ("Filed 0 under 'X'").
     if filed:
@@ -697,6 +739,10 @@ def file_papers(refs: list[str], collection: str) -> str:
             "works on queued papers, so queue_papers these first (or use "
             "queue_papers with collections=[...] to queue and file at once)"
         )
+    if ambiguous:
+        parts.append(_ambiguity_note(ambiguous, "filed"))
+    if blank_note:
+        parts.append(blank_note)
     return " | ".join(parts)
 
 
@@ -707,15 +753,27 @@ def unfile_papers(refs: list[str], collection: str) -> str:
     The inverse of file_papers, for misfiled items: membership in the
     named collection is dropped, while the item, its other collections
     (including the Reading Queue), and its sent-state are untouched.
+    The Reading Queue itself is refused as a target — leaving the queue
+    is remove_from_queue's job, with its keep-or-trash safeguards.
     To move a paper between collections, file it into the new one and
     unfile it from the old. Refs match like remove_from_queue: exact
-    arXiv id, DOI, URL, or title, against the collection's items.
+    arXiv id, DOI, URL, or title, against the collection's items; an
+    ambiguous ref (matching several items) removes nothing.
     """
     zotero_client.ensure_configured()
     if not collection.strip():
         return "Nothing removed: the collection name must be non-empty."
+    if _is_queue_collection(collection):
+        return (
+            "Nothing removed: taking a paper out of the Reading Queue "
+            "is remove_from_queue's job (it keeps or trashes the item "
+            "safely). unfile_papers only handles topical collections."
+        )
+    refs, blank_note = _drop_blank_refs(refs)
     try:
-        removed, misses = zotero_client.unfile_by_refs(refs, collection)
+        removed, misses, ambiguous = zotero_client.unfile_by_refs(
+            refs, collection
+        )
     except ValueError as exc:
         return f"Nothing removed: {exc}"
     receipt = f"Removed {len(removed)} item(s) from '{collection}'"
@@ -723,6 +781,10 @@ def unfile_papers(refs: list[str], collection: str) -> str:
         receipt += ": " + "; ".join(removed)
     if misses:
         receipt += f" | Not found in that collection: {'; '.join(misses)}"
+    if ambiguous:
+        receipt += " | " + _ambiguity_note(ambiguous, "removed")
+    if blank_note:
+        receipt += f" | {blank_note}"
     return receipt
 
 
@@ -754,6 +816,7 @@ def remove_from_queue(refs: list[str]) -> str:
     removes nothing; the receipt lists each candidate's specific id so
     the user can choose. Relay that choice — never pick for them.
     """
+    refs, blank_note = _drop_blank_refs(refs)
     removed, misses, ambiguous = zotero_client.remove_by_refs(refs)
     # Partition so each title is reported exactly once, by outcome.
     kept = [e["title"] for e in removed if e["kept_in_library"]]
@@ -783,15 +846,9 @@ def remove_from_queue(refs: list[str]) -> str:
     if misses:
         receipt += f" | Not found in queue: {'; '.join(misses)}"
     if ambiguous:
-        parts = [
-            f"{entry['ref']!r} matches {len(entry['candidates'])} items "
-            f"({', '.join(entry['candidates'])})"
-            for entry in ambiguous
-        ]
-        receipt += (
-            " | NOT removed (ambiguous — ask the user which, then "
-            f"re-run with that id): {'; '.join(parts)}"
-        )
+        receipt += " | " + _ambiguity_note(ambiguous, "removed")
+    if blank_note:
+        receipt += f" | {blank_note}"
     return receipt
 
 

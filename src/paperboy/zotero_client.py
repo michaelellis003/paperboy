@@ -216,64 +216,94 @@ def add_paper(
     return result["successful"]["0"]["key"], "created"
 
 
+def _matching_items(ref: str, items: list[dict]) -> list[dict]:
+    """All items a ref matches: exact ids/titles, or the Zotero item key.
+
+    Item keys are matched so the disambiguation ids that receipts and
+    list_queue advertise are actually consumable — an instruction like
+    "re-run with that id" must never be a dead end.
+    """
+    needle = ref.strip()
+    if not needle:
+        return []
+    return [
+        item
+        for item in items
+        if item.get("key") == needle or _ref_matches(ref, item["data"])
+    ]
+
+
+def _ambiguity(ref: str, matches: list[dict]) -> dict:
+    return {
+        "ref": ref,
+        "candidates": [
+            _unique_ref({**m["data"], "key": m["key"]}) for m in matches
+        ],
+    }
+
+
 def file_by_refs(
     refs: list[str], collection_name: str
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[dict]]:
     """File queue items into a collection (created on demand).
 
-    Matching is the same exact-only logic as removal. The collection is
-    created only once at least one ref matches — a call that files
-    nothing leaves no phantom empty collection behind. Returns (filed
-    titles, refs that matched nothing).
+    Matching is the same exact-only logic as removal, including the
+    refusal to act on a ref that matches more than one item. The
+    collection is created only once at least one ref matches — a call
+    that files nothing leaves no phantom empty collection behind.
+    Returns (filed titles, refs that matched nothing, ambiguous refs
+    with candidates).
     """
     items = _queue_items()
-    filed, misses = [], []
+    filed, misses, ambiguous = [], [], []
     key: str | None = None
     for ref in refs:
-        match = next(
-            (item for item in items if _ref_matches(ref, item["data"])),
-            None,
-        )
-        if match is None:
+        matches = _matching_items(ref, items)
+        if not matches:
             misses.append(ref)
+            continue
+        if len(matches) > 1:
+            ambiguous.append(_ambiguity(ref, matches))
             continue
         if key is None:
             key = collection_key(collection_name, create=True)
         if key:
-            _add_to_collection(match, key)
-        filed.append(match["data"].get("title", match["key"]))
-    return filed, misses
+            _add_to_collection(matches[0], key)
+        filed.append(matches[0]["data"].get("title", matches[0]["key"]))
+    return filed, misses, ambiguous
 
 
 def unfile_by_refs(
     refs: list[str], collection_name: str
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[dict]]:
     """Remove items from one collection without touching anything else.
 
     The inverse of file_by_refs: membership in the named collection is
     dropped; the item itself, its other collections (including the
     Reading Queue), and its sent-state all stay as they are. Matching
     is the same exact-only logic as removal, against the collection's
-    own items. Returns (removed titles, refs that matched nothing).
-    Raises ValueError when the collection does not exist.
+    own items, and a ref matching more than one item removes nothing.
+    Returns (removed titles, refs that matched nothing, ambiguous refs
+    with candidates). Raises ValueError when the collection does not
+    exist.
     """
     key = collection_key(collection_name)
     if key is None:
         raise ValueError(f"No collection named {collection_name!r}.")
     api = _api()
     items = api.everything(api.collection_items_top(key))
-    removed, misses = [], []
+    removed, misses, ambiguous = [], [], []
     for ref in refs:
-        match = next(
-            (item for item in items if _ref_matches(ref, item["data"])),
-            None,
-        )
-        if match is None:
+        matches = _matching_items(ref, items)
+        if not matches:
             misses.append(ref)
             continue
-        api.deletefrom_collection(key, match)
-        removed.append(match["data"].get("title", match["key"]))
-    return removed, misses
+        if len(matches) > 1:
+            ambiguous.append(_ambiguity(ref, matches))
+            continue
+        api.deletefrom_collection(key, matches[0])
+        removed.append(matches[0]["data"].get("title", matches[0]["key"]))
+    return removed, misses, ambiguous
 
 
 def seed_ids(limit: int = 10) -> list[str]:
@@ -425,20 +455,12 @@ def remove_by_refs(
     items = _queue_items()
     removed, misses, ambiguous = [], [], []
     for ref in refs:
-        matches = [item for item in items if _ref_matches(ref, item["data"])]
+        matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
             continue
         if len(matches) > 1:
-            ambiguous.append(
-                {
-                    "ref": ref,
-                    "candidates": [
-                        _unique_ref({**m["data"], "key": m["key"]})
-                        for m in matches
-                    ],
-                }
-            )
+            ambiguous.append(_ambiguity(ref, matches))
             continue
         match = matches[0]
         # An item the user filed into topical collections is theirs to

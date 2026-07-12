@@ -341,6 +341,44 @@ def test_remove_by_refs_specific_id_beats_duplicate_titles(fake_api):
     assert fake_api.trashed == ["PUB"]
 
 
+def test_remove_by_refs_accepts_item_key(fake_api):
+    # The disambiguation ids receipts advertise (Zotero item keys, for
+    # items with no DOI/URL) must be consumable — never a dead end.
+    fake_api.queue = [
+        {"key": "IMJQVDDX", "data": {"title": "Only A Title"}},
+    ]
+    removed, misses, ambiguous = zotero_client.remove_by_refs(["IMJQVDDX"])
+    assert [e["title"] for e in removed] == ["Only A Title"]
+    assert misses == [] and ambiguous == []
+
+
+def test_file_and_unfile_refuse_ambiguous_titles(fake_api):
+    fake_api.existing_collections.append(
+        {"key": "TOPIC", "data": {"name": "Topical"}}
+    )
+    fake_api.queue = [
+        {"key": "A", "data": {"title": "Same Title", "collections": []}},
+        {"key": "B", "data": {"title": "Same Title", "collections": []}},
+    ]
+    filed, misses, ambiguous = zotero_client.file_by_refs(
+        ["same title"], "Topical"
+    )
+    assert filed == [] and misses == []
+    assert ambiguous[0]["candidates"] == ["A", "B"]
+
+    fake_api.queue[0]["data"]["collections"] = ["TOPIC"]
+    fake_api.queue[1]["data"]["collections"] = ["TOPIC"]
+    removed, misses, ambiguous = zotero_client.unfile_by_refs(
+        ["same title"], "Topical"
+    )
+    assert removed == [] and misses == []
+    assert len(ambiguous) == 1
+    # An item key resolves the ambiguity.
+    removed, _, ambiguous = zotero_client.unfile_by_refs(["B"], "Topical")
+    assert removed == ["Same Title"]
+    assert ambiguous == []
+
+
 def test_remove_by_refs_reports_sent_state(env, fake_api):
     fake_api.queue = [
         {
@@ -552,7 +590,7 @@ def test_file_by_refs(fake_api):
             "data": {"title": "Alpha", "DOI": "10.1000/alpha"},
         }
     ]
-    filed, misses = zotero_client.file_by_refs(
+    filed, misses, _ = zotero_client.file_by_refs(
         ["10.1000/alpha", "missing-ref"], "Topical"
     )
     assert filed == ["Alpha"]
@@ -562,7 +600,7 @@ def test_file_by_refs(fake_api):
 
 def test_file_by_refs_no_match_creates_no_collection(fake_api):
     fake_api.queue = [{"key": "A", "data": {"title": "Alpha"}}]
-    filed, misses = zotero_client.file_by_refs(["missing-ref"], "Phantom")
+    filed, misses, _ = zotero_client.file_by_refs(["missing-ref"], "Phantom")
     assert filed == []
     assert misses == ["missing-ref"]
     # A call that files nothing must not create an empty collection.
@@ -583,7 +621,7 @@ def test_unfile_by_refs_drops_only_that_membership(fake_api):
             },
         }
     ]
-    removed, misses = zotero_client.unfile_by_refs(
+    removed, misses, _ = zotero_client.unfile_by_refs(
         ["10.1000/alpha", "missing-ref"], "Topical"
     )
     assert removed == ["Alpha"]
