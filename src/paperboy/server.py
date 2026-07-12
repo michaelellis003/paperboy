@@ -80,6 +80,10 @@ def search_papers(
     still fail if the link is dead (arXiv-hosted papers are the most
     reliable).
     """
+    if not query.strip():
+        # OpenAlex answers an empty query with its default ranking —
+        # all-time most-cited papers — which would read as results.
+        raise ValueError("Search needs a non-empty query.")
     max_results = max(1, min(max_results, 25))
     try:
         if source == "arxiv":

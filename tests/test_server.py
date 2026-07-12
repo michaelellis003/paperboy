@@ -79,6 +79,11 @@ def test_search_max_results_floor_and_cap(env, monkeypatch):
     assert seen == [1, 25]
 
 
+def test_search_rejects_empty_query(env):
+    with pytest.raises(ValueError, match="non-empty query"):
+        server.search_papers("   ")
+
+
 def test_search_wraps_backend_errors_actionably(env, monkeypatch):
     def boom(q, max_results):
         raise httpx.ConnectError("no route to host")
