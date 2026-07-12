@@ -93,10 +93,14 @@ def search_papers(
             papers = openalex.search(query, max_results=max_results)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
+            alternative = (
+                " Rephrasing won't help."
+                if source == "arxiv"
+                else " Or use source='arxiv' — rephrasing won't help."
+            )
             raise RuntimeError(
                 "The search backend is rate-limiting this connection. "
-                "Wait a minute, or use source='arxiv' — rephrasing "
-                "won't help."
+                "Wait a minute and retry." + alternative
             ) from exc
         raise RuntimeError(
             f"Search failed ({type(exc).__name__}): {exc} — retry, or "
@@ -450,9 +454,15 @@ def _download_all(
         try:
             downloaded.append((paper, resolver.download_pdf(paper)))
         except httpx.HTTPError as exc:
+            # Only claim queued-for-retry when a queue actually exists.
+            note = (
+                " — queued unsent for retry"
+                if settings().zotero_enabled
+                else " — not queued (Zotero is not configured); retry the ref"
+            )
             failures.append(
                 f"download failed: {paper.title} "
-                f"({type(exc).__name__}: {exc}) — queued unsent for retry"
+                f"({type(exc).__name__}: {exc}){note}"
             )
         except ValueError as exc:
             junk.append(paper)
@@ -626,7 +636,7 @@ def send_papers(
                 item_key, _ = zotero_client.add_paper(
                     paper, collections=collections
                 )
-                if not paper.pdf_url:
+                if not paper.pdf_url or id(paper) in junk_keys:
                     zotero_client.mark_no_pdf(item_key)
             queued_note = " (queued unsent in Zotero Reading Queue"
             if collections:

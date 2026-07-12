@@ -1454,3 +1454,59 @@ def test_http_auth_uses_oauth_when_configured(monkeypatch):
     monkeypatch.setenv("OAUTH_ALLOWED_EMAILS", "owner@example.com")
     auth = server._http_auth()
     assert isinstance(auth, oauth.PaperboyAuth)
+
+
+def test_all_failed_junk_downloads_are_tagged(
+    zotero_env, monkeypatch, paper_factory, sent_documents
+):
+    # The all-failed branch must tag junk like the delivered branch
+    # does, or the "won't auto-retry" receipt is false.
+    tagged = []
+    monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
+    monkeypatch.setattr(
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("JUNKKEY", "created"),
+    )
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        resolver,
+        "download_pdf",
+        lambda paper: (_ for _ in ()).throw(ValueError("non-PDF content")),
+    )
+    receipt = server.send_papers(["2401.12345"])
+    assert "won't auto-retry" in receipt
+    assert tagged == ["JUNKKEY"]
+    assert sent_documents == []
+
+
+def test_download_retry_note_honest_without_zotero(
+    env, monkeypatch, paper_factory, sent_documents
+):
+    # Without Zotero there is no queue: the receipt must not claim
+    # "queued unsent for retry".
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        resolver,
+        "download_pdf",
+        lambda paper: (_ for _ in ()).throw(httpx.ConnectError("reset")),
+    )
+    receipt = server.send_papers(["2401.12345"])
+    assert "queued unsent for retry" not in receipt
+    assert "Zotero is not configured" in receipt
+
+
+def test_search_429_advice_matches_source(env, monkeypatch):
+    request = httpx.Request("GET", "https://export.arxiv.org/api/query")
+
+    def throttled(q, max_results):
+        raise httpx.HTTPStatusError(
+            "429",
+            request=request,
+            response=httpx.Response(429, request=request),
+        )
+
+    monkeypatch.setattr(arxiv, "search", throttled)
+    with pytest.raises(RuntimeError) as excinfo:
+        server.search_papers("q", source="arxiv")
+    assert "use source='arxiv'" not in str(excinfo.value)
