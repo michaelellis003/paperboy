@@ -198,6 +198,17 @@ def test_publisher_url_error_includes_hint(monkeypatch):
         resolver.resolve("https://www.nature.com/articles/s41586-x")
 
 
+def test_ieee_style_url_not_parsed_as_arxiv_id(monkeypatch):
+    # A path like /document/9999999 matches the old-style-id shape; the
+    # resolver must NOT fire a bogus arXiv API call for it, and must
+    # surface the publisher-landing hint instead. openalex/arxiv search
+    # are stubbed so any real network call would be the bug.
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="publisher landing URLs"):
+        resolver.resolve("https://ieeexplore.ieee.org/document/9999999")
+
+
 def test_download_reports_cause_when_all_fail(monkeypatch, paper_factory):
     monkeypatch.setattr(
         resolver,

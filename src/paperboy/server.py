@@ -614,16 +614,26 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
         reason = "; ".join(problems) if problems else "no valid refs given"
         return f"Nothing was queued: {reason}"
     queue = settings().reading_queue_collection
-    parts = [f"Queued {len(new)} new paper(s) in '{queue}'"]
-    if collections:
-        parts[0] += f" (filed under: {'; '.join(collections)})"
+    # Lead with what actually changed: brand-new items, else re-adds,
+    # else a plain no-op — never a "Queued 0 new" that reads as failure
+    # when a paper was in fact put back in the queue.
+    filed = f" (filed under: {'; '.join(collections)})" if collections else ""
     if new:
-        parts[0] += ": " + "; ".join(new)
-    if requeued:
-        parts.append(
-            "re-added to the queue (already in your library): "
-            + "; ".join(requeued)
-        )
+        headline = f"Queued {len(new)} new paper(s) in '{queue}'{filed}"
+        headline += ": " + "; ".join(new)
+        parts = [headline]
+        if requeued:
+            parts.append(
+                "re-added to the queue (already in your library): "
+                + "; ".join(requeued)
+            )
+    elif requeued:
+        parts = [
+            f"Re-added {len(requeued)} paper(s) to '{queue}'{filed} "
+            "(already in your library): " + "; ".join(requeued)
+        ]
+    else:
+        parts = [f"Nothing new to queue in '{queue}'"]
     if already:
         parts.append(f"already in queue: {'; '.join(already)}")
     if no_pdf:

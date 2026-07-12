@@ -10,7 +10,7 @@ import re
 import time
 
 from .config import settings
-from .models import Paper, clean_title
+from .models import Paper
 from .net import client
 
 _API = "https://api.openalex.org/works"
@@ -80,7 +80,7 @@ def _parse_work(work: dict) -> Paper:
         else best_oa.get("pdf_url")
     )
     return Paper(
-        title=clean_title(work.get("display_name") or "(untitled)"),
+        title=work.get("display_name") or "(untitled)",
         authors=[
             authorship["author"]["display_name"]
             for authorship in work.get("authorships", [])

@@ -57,6 +57,13 @@ def test_normalize_id_rejects_garbage():
         arxiv.normalize_id("not a paper")
 
 
+def test_normalize_id_rejects_non_arxiv_url():
+    # /document/9999999 matches the old-style id shape but is not arXiv;
+    # rejecting it here prevents a bogus arXiv API call downstream.
+    with pytest.raises(ValueError, match="Not an arXiv URL"):
+        arxiv.normalize_id("https://ieeexplore.ieee.org/document/9999999")
+
+
 def test_get_paper_parses_entry(monkeypatch):
     monkeypatch.setattr(arxiv, "client", _client(ATOM))
     paper = arxiv.get_paper("2401.12345")

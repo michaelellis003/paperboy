@@ -29,6 +29,12 @@ _SUBJECT_CLASS = re.compile(r"^([a-z-]+)\.[A-Za-z-]+/")
 def normalize_id(id_or_url: str) -> str:
     """Accept '2401.12345', 'arXiv:2401.12345v2', or an abs/pdf URL."""
     text = id_or_url.strip().removeprefix("arXiv:").removeprefix("arxiv:")
+    # A non-arXiv URL must not be parsed as an id: paths like
+    # ieeexplore.ieee.org/document/9999999 otherwise match the old-style
+    # id pattern ("document/9999999") and trigger a bogus arXiv API call.
+    lower = text.lower()
+    if lower.startswith(("http://", "https://")) and "arxiv.org" not in lower:
+        raise ValueError(f"Not an arXiv URL: {id_or_url!r}")
     # arXiv listing pages append query strings (?context=cs) that the
     # end-anchored id pattern would otherwise choke on.
     text = text.split("?", 1)[0].split("#", 1)[0]

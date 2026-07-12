@@ -42,6 +42,12 @@ class Paper:
     arxiv_id: str | None = None
     doi: str | None = None
 
+    def __post_init__(self) -> None:
+        # Clean the title once, here, so every source (arXiv, Crossref,
+        # OpenAlex, Semantic Scholar) is covered and none can leak the
+        # <i>...</i> markup that publisher metadata carries.
+        self.title = clean_title(self.title)
+
     @property
     def safe_filename(self) -> str:
         """Filesystem- and email-safe PDF filename derived from the title."""
