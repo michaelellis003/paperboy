@@ -136,6 +136,9 @@ def _is_usable(paper: Paper) -> bool:
         len(title) >= 10
         and not title.startswith("(")  # "(untitled)"
         and not title.endswith("(")  # truncated, e.g. "UvA-DARE ("
+        # A real title-only record carries SOME corroborating metadata;
+        # junk like "a journal of mathematics" carries none.
+        and bool(paper.published or paper.abstract or paper.url)
     )
 
 
@@ -433,15 +436,31 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
 
 def _download_all(
     papers: list[Paper],
-) -> tuple[list[tuple[Paper, bytes]], list[str]]:
-    """Download PDFs one by one; a dead link never blocks the batch."""
-    downloaded, failures = [], []
+) -> tuple[list[tuple[Paper, bytes]], list[str], list[Paper]]:
+    """Download PDFs one by one; a dead link never blocks the batch.
+
+    Returns (downloaded, failure messages, junk papers). Junk papers
+    failed deterministically — every candidate URL served non-PDF
+    content or was dead — and get tagged no-oa-pdf, matching
+    send_queue's classification of the same failure. Transient
+    transport failures stay untagged for retry.
+    """
+    downloaded, failures, junk = [], [], []
     for paper in papers:
         try:
             downloaded.append((paper, resolver.download_pdf(paper)))
-        except (ValueError, httpx.HTTPError) as exc:
-            failures.append(f"download failed: {paper.title} ({exc})")
-    return downloaded, failures
+        except httpx.HTTPError as exc:
+            failures.append(
+                f"download failed: {paper.title} "
+                f"({type(exc).__name__}: {exc}) — queued unsent for retry"
+            )
+        except ValueError as exc:
+            junk.append(paper)
+            failures.append(
+                f"no usable open-access PDF (won't auto-retry): "
+                f"{paper.title} ({exc})"
+            )
+    return downloaded, failures, junk
 
 
 def _chunk(
@@ -555,7 +574,8 @@ def send_papers(
         # what a pre-send size check is for.
         if known:
             headline = f"Would send {len(sendable)} paper(s), ~{total:.1f} MB"
-            headline += " for the ones I could size"
+            if unknown:
+                headline += " for the ones I could size"
         else:
             headline = f"Would send {len(sendable)} paper(s)"
         if unknown:
@@ -595,14 +615,8 @@ def send_papers(
         for item in already_sent_items:
             zotero_client.file_item(item, collections)
 
-    downloaded, failures = _download_all(sendable)
-    if failures and settings().zotero_enabled:
-        # Failed downloads are still recorded in the queue below, so a
-        # later send_queue retries them — say so instead of leaving
-        # the failure looking final.
-        failures = [
-            f"{failure} — queued unsent for retry" for failure in failures
-        ]
+    downloaded, failures, junk = _download_all(sendable)
+    junk_keys = {id(paper) for paper in junk}
     problems.extend(failures)
 
     if not downloaded:
@@ -624,11 +638,12 @@ def send_papers(
             + f"): {p.title}"
             for p in already_sent
         ]
+        tail = "; ".join(skips + problems) or "no valid refs given"
         return (
             "Nothing was sent."
             + queued_note
             + " | "
-            + "; ".join(skips + problems)
+            + tail
             + (_oa_hint() if no_pdf else "")
             + collection_note
             + _collections_ignored_note(collections)
@@ -646,7 +661,7 @@ def send_papers(
             )
             if paper.safe_filename in delivered:
                 zotero_client.mark_sent(item_key)
-            elif not paper.pdf_url:
+            elif not paper.pdf_url or id(paper) in junk_keys:
                 zotero_client.mark_no_pdf(item_key)
         receipt += " (recorded in Zotero Reading Queue)"
         if collections:
@@ -699,7 +714,7 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
             no_pdf.append(paper.title)
     if not resolved:
         reason = "; ".join(problems) if problems else "no valid refs given"
-        return f"Nothing was queued: {reason}"
+        return f"Nothing was queued: {reason}" + collection_note
     queue = settings().reading_queue_collection
     # Lead with what actually changed: brand-new items, else re-adds,
     # else a plain no-op — never a "Queued 0 new" that reads as failure
@@ -938,14 +953,32 @@ def send_queue() -> str:
             skipped.append(f"{title} (no DOI, URL, or title)")
             continue
         paper = None
+        transient_failure = False
         for ref in refs:
             try:
                 paper = resolver.resolve(ref)
                 break
-            except (ValueError, httpx.HTTPError):
+            except ValueError:
+                continue
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in (408, 429) or status >= 500:
+                    transient_failure = True
+                continue
+            except httpx.HTTPError:
+                transient_failure = True
                 continue
         if paper is None:
-            skipped.append(f"{title} (unresolvable: {refs[0]})")
+            # An outage must not read as "this record is broken":
+            # during one, every queue item would be declared
+            # unresolvable, inviting cleanup of perfectly good items.
+            if transient_failure:
+                skipped.append(
+                    f"{title} (backend temporarily unreachable — left "
+                    "unsent, the next send_queue will retry)"
+                )
+            else:
+                skipped.append(f"{title} (unresolvable: {refs[0]})")
             continue
         if not paper.pdf_url:
             zotero_client.mark_no_pdf(item["key"])

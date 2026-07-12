@@ -78,7 +78,15 @@ def _oa_pdf_url(doi: str) -> str | None:
         # tell the user to set CONTACT_EMAIL.
         return None
     response = client.get(_UNPAYWALL + doi, params={"email": email})
+    if response.status_code == 404:
+        # Definitive: Unpaywall has no record for this DOI.
+        return None
     if response.status_code != 200:
+        # Anything else (429, 5xx, 422) is Unpaywall's problem, not a
+        # fact about the paper. Swallowing it here would record a
+        # false, permanent "no open-access PDF" verdict — and the
+        # no-oa-pdf tag would drop the paper from auto-send forever.
+        response.raise_for_status()
         return None
     data = response.json()
     locations = [

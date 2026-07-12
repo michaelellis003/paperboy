@@ -519,7 +519,8 @@ def test_send_papers_survives_dead_pdf_link(
     monkeypatch.setattr(resolver, "download_pdf", fake_download)
     receipt = server.send_papers(["2401.12345", "10.1/dead"])
     assert len(sent_documents) == 1
-    assert "download failed: Dead Link" in receipt
+    # A deterministic failure (every URL dead/junk) is not retried.
+    assert "no usable open-access PDF (won't auto-retry): Dead Link" in receipt
 
 
 def test_download_failure_notes_queued_retry_with_zotero(
@@ -537,7 +538,7 @@ def test_download_failure_notes_queued_retry_with_zotero(
 
     def fake_download(paper):
         if paper.title == "Dead Link":
-            raise ValueError("404")
+            raise httpx.ConnectTimeout("mirror timed out")
         return b"%PDF"
 
     monkeypatch.setattr(resolver, "download_pdf", fake_download)

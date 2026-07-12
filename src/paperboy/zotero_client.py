@@ -508,7 +508,11 @@ def remove_by_refs(
     refs with their candidates' specific ids).
     """
     api = _api()
-    queue_key = _queue_collection_key()
+    # Read-only lookup: removal from a queue that doesn't exist is a
+    # no-op, and must not create the collection as a side effect.
+    queue_key = collection_key(settings().reading_queue_collection)
+    if queue_key is None:
+        return [], [ref for ref in refs if ref.strip()], []
     items = _queue_items()
     removed, misses, ambiguous = [], [], []
     for ref in refs:

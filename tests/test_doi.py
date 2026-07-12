@@ -92,10 +92,22 @@ def test_oa_pdf_falls_back_to_other_locations(env, monkeypatch):
     assert paper.pdf_url == "https://backup.org/p.pdf"
 
 
-def test_unpaywall_failure_means_no_pdf(env, monkeypatch):
-    monkeypatch.setattr(doi, "client", _client(unpaywall_status=422))
+def test_unpaywall_404_means_no_pdf(env, monkeypatch):
+    # 404 is Unpaywall's definitive "no record for this DOI".
+    monkeypatch.setattr(doi, "client", _client(unpaywall_status=404))
     paper = doi.get_paper("10.1371/journal.pcbi.1003285")
     assert paper.pdf_url is None
+
+
+def test_unpaywall_outage_is_not_a_no_pdf_verdict(env, monkeypatch):
+    # 429/5xx/422 are Unpaywall's problem, not a fact about the paper.
+    # Swallowing them would permanently tag an OA paper no-oa-pdf.
+    import httpx
+    import pytest
+
+    monkeypatch.setattr(doi, "client", _client(unpaywall_status=503))
+    with pytest.raises(httpx.HTTPStatusError):
+        doi.get_paper("10.1371/journal.pcbi.1003285")
 
 
 def test_no_polite_email_skips_unpaywall_entirely(env, monkeypatch):
