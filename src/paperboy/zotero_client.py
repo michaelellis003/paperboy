@@ -160,15 +160,19 @@ def file_item(item: dict, collections: list[str] | None) -> None:
 
 def add_paper(
     paper: Paper, collections: list[str] | None = None
-) -> tuple[str, bool]:
+) -> tuple[str, str]:
     """Add a paper to the Reading Queue, deduplicating by arXiv id/DOI.
 
     arXiv papers become ``preprint`` items; DOI-resolved papers become
     ``journalArticle`` items. ``collections`` names extra topical
     collections to file into (created on demand) — Zotero items can
     live in many collections, so the queue membership is unaffected.
-    Returns (item key, created) where created is False when the paper
-    was already in the queue.
+
+    Returns (item key, status) where status is:
+    - "created": a new library item was created and queued;
+    - "requeued": the paper existed in the library (e.g. filed in a
+      collection) but was not in the queue, and was re-added to it;
+    - "already_queued": the paper was already in the queue (no change).
     """
     api = _api()
     queue_key = _queue_collection_key()
@@ -180,12 +184,14 @@ def add_paper(
     if existing:
         # An item previously removed from the queue (but kept in the
         # library via topical collections) rejoins the queue instead of
-        # spawning a duplicate record.
+        # spawning a duplicate record. Distinguish a true no-op (already
+        # in the queue) from a genuine re-add so the receipt is honest.
+        was_queued = queue_key in existing["data"].get("collections", [])
         _add_to_collection(existing, queue_key)
         for key in extra_keys:
             if key:
                 _add_to_collection(existing, key)
-        return existing["key"], False
+        return existing["key"], ("already_queued" if was_queued else "requeued")
 
     if paper.arxiv_id:
         template = api.item_template("preprint")
@@ -207,7 +213,7 @@ def add_paper(
     result = api.create_items([template])
     if result["failed"]:
         raise RuntimeError(f"Zotero rejected item: {result['failed']}")
-    return result["successful"]["0"]["key"], True
+    return result["successful"]["0"]["key"], "created"
 
 
 def file_by_refs(

@@ -45,6 +45,13 @@ def test_search_parses_work(env, monkeypatch):
     assert paper.published == "2017-06"
 
 
+def test_search_strips_html_from_title(env, monkeypatch):
+    work = {**WORK, "display_name": "<i>Colloquium</i> : Many-body physics"}
+    monkeypatch.setattr(openalex, "client", _client([work]))
+    paper = openalex.search("mbl", max_results=1)[0]
+    assert paper.title == "Colloquium: Many-body physics"
+
+
 def test_date_from_arxiv_id():
     assert openalex._date_from_arxiv_id("2401.12345") == "2024-01"
     assert openalex._date_from_arxiv_id("math/0309136") == "2003-09"

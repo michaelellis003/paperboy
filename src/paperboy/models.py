@@ -4,11 +4,25 @@ import re
 from dataclasses import dataclass
 
 _WORDS = re.compile(r"[^a-z0-9 ]")
+_HTML_TAG = re.compile(r"<[^>]+>")
 
 
 def normalize_title(text: str) -> str:
     """Lowercased, punctuation-free title for matching/dedup."""
     return " ".join(_WORDS.sub(" ", text.lower()).split())
+
+
+def clean_title(text: str) -> str:
+    """Strip inline HTML/JATS markup and collapse whitespace.
+
+    Publisher metadata (Physical Review titles especially) carries tags
+    like ``<i>Colloquium</i>`` that would otherwise show up verbatim in
+    search results and receipts.
+    """
+    stripped = _HTML_TAG.sub("", text)
+    # Tag removal can leave a space before punctuation ("Colloquium :").
+    stripped = re.sub(r"\s+([:;,.])", r"\1", stripped)
+    return " ".join(stripped.split())
 
 
 @dataclass

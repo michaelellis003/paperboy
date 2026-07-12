@@ -30,7 +30,9 @@ def zotero_env(env, monkeypatch):
     env.setattr(paperboy.config, "_settings", None)
     monkeypatch.setattr(zotero_client, "find_item", lambda p: None)
     monkeypatch.setattr(
-        zotero_client, "add_paper", lambda p, collections=None: ("KEY", True)
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "created"),
     )
     monkeypatch.setattr(zotero_client, "mark_sent", lambda k: None)
     monkeypatch.setattr(zotero_client, "mark_no_pdf", lambda k: None)
@@ -546,7 +548,7 @@ def test_send_papers_records_in_zotero(
 
     def fake_add(paper, collections=None):
         added.append(paper)
-        return "KEY", True
+        return "KEY", "created"
 
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(zotero_client, "add_paper", fake_add)
@@ -662,7 +664,9 @@ def zotero_ok(monkeypatch):
 def test_queue_papers(env, zotero_ok, monkeypatch, paper_factory):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(
-        zotero_client, "add_paper", lambda p, collections=None: ("KEY", True)
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "created"),
     )
     receipt = server.queue_papers(["2401.12345"])
     assert "Queued 1 new paper(s) in 'Reading Queue'" in receipt
@@ -673,11 +677,31 @@ def test_queue_papers_reports_existing(
 ):
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(
-        zotero_client, "add_paper", lambda p, collections=None: ("KEY", False)
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "already_queued"),
     )
     receipt = server.queue_papers(["2401.12345"])
     assert "Queued 0 new paper(s)" in receipt
     assert "already in queue: A Test Paper" in receipt
+
+
+def test_queue_papers_reports_requeued_honestly(
+    env, zotero_ok, monkeypatch, paper_factory
+):
+    # A paper filed in a collection but not in the queue, re-added: the
+    # receipt must NOT claim "already in queue" (the round-4 bug).
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "requeued"),
+    )
+    receipt = server.queue_papers(["2401.12345"])
+    assert "already in queue" not in receipt
+    assert "re-added to the queue (already in your library): A Test Paper" in (
+        receipt
+    )
 
 
 def test_queue_papers_nothing_resolves(env, zotero_ok, monkeypatch):
@@ -697,7 +721,9 @@ def test_queue_papers_tags_no_pdf_at_queue_time(
         resolver, "resolve", lambda ref: paper_factory(pdf_url=None)
     )
     monkeypatch.setattr(
-        zotero_client, "add_paper", lambda p, collections=None: ("KEY", True)
+        zotero_client,
+        "add_paper",
+        lambda p, collections=None: ("KEY", "created"),
     )
     monkeypatch.setattr(zotero_client, "mark_no_pdf", tagged.append)
     receipt = server.queue_papers(["10.1/x"])
@@ -744,7 +770,7 @@ def test_queue_papers_files_into_collections(
 
     def fake_add(paper, collections=None):
         seen["collections"] = collections
-        return "KEY", True
+        return "KEY", "created"
 
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(zotero_client, "add_paper", fake_add)
@@ -762,7 +788,7 @@ def test_send_papers_files_into_collections(
 
     def fake_add(paper, collections=None):
         seen["collections"] = collections
-        return "KEY", True
+        return "KEY", "created"
 
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(zotero_client, "add_paper", fake_add)
@@ -848,7 +874,7 @@ def test_empty_collection_names_are_dropped(
 
     def fake_add(paper, collections=None):
         seen["collections"] = collections
-        return "KEY", True
+        return "KEY", "created"
 
     monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
     monkeypatch.setattr(zotero_client, "add_paper", fake_add)

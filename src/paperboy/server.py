@@ -600,12 +600,13 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
     zotero_client.ensure_configured()
     collections, collection_note = _clean_collections(collections)
     resolved, problems = _resolve_all(refs)
-    new, existing, no_pdf = [], [], []
+    new, requeued, already, no_pdf = [], [], [], []
+    bucket = {"created": new, "requeued": requeued, "already_queued": already}
     for paper in resolved:
-        item_key, created = zotero_client.add_paper(
+        item_key, status = zotero_client.add_paper(
             paper, collections=collections
         )
-        (new if created else existing).append(paper.title)
+        bucket[status].append(paper.title)
         if not paper.pdf_url:
             zotero_client.mark_no_pdf(item_key)
             no_pdf.append(paper.title)
@@ -618,8 +619,13 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
         parts[0] += f" (filed under: {'; '.join(collections)})"
     if new:
         parts[0] += ": " + "; ".join(new)
-    if existing:
-        parts.append(f"already in queue: {'; '.join(existing)}")
+    if requeued:
+        parts.append(
+            "re-added to the queue (already in your library): "
+            + "; ".join(requeued)
+        )
+    if already:
+        parts.append(f"already in queue: {'; '.join(already)}")
     if no_pdf:
         parts.append(
             "no open-access PDF (won't be auto-sent): "

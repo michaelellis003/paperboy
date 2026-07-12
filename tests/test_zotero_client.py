@@ -108,8 +108,8 @@ def fake_api(env, monkeypatch):
 
 
 def test_add_arxiv_paper_creates_preprint(fake_api, paper_factory):
-    key, created = zotero_client.add_paper(paper_factory())
-    assert (key, created) == ("NEWITEM", True)
+    key, status = zotero_client.add_paper(paper_factory())
+    assert (key, status) == ("NEWITEM", "created")
     item = fake_api.created[0]
     assert item["itemType"] == "preprint"
     assert item["archiveID"] == "arXiv:2401.12345"
@@ -128,19 +128,28 @@ def test_add_paper_dedups_on_arxiv_url(fake_api, paper_factory):
     fake_api.queue = [
         {
             "key": "EXISTING",
-            "data": {"url": "https://arxiv.org/abs/2401.12345"},
+            "data": {
+                "url": "https://arxiv.org/abs/2401.12345",
+                "collections": ["COLL"],
+            },
         }
     ]
-    assert zotero_client.add_paper(paper_factory()) == ("EXISTING", False)
+    assert zotero_client.add_paper(paper_factory()) == (
+        "EXISTING",
+        "already_queued",
+    )
     assert fake_api.created == []
 
 
 def test_add_paper_dedups_on_doi_case_insensitive(fake_api, paper_factory):
     fake_api.queue = [
-        {"key": "EXISTING", "data": {"DOI": "10.1038/NATURE12373"}}
+        {
+            "key": "EXISTING",
+            "data": {"DOI": "10.1038/NATURE12373", "collections": ["COLL"]},
+        }
     ]
     paper = paper_factory(arxiv_id=None, doi="10.1038/nature12373")
-    assert zotero_client.add_paper(paper) == ("EXISTING", False)
+    assert zotero_client.add_paper(paper) == ("EXISTING", "already_queued")
 
 
 def test_add_paper_rejected_by_zotero(fake_api, paper_factory):
@@ -448,8 +457,8 @@ def test_requeue_of_kept_item_rejoins_queue(fake_api, paper_factory):
         },
     }
     fake_api.library_items = [kept]
-    key, created = zotero_client.add_paper(paper_factory())
-    assert (key, created) == ("KEPT", False)
+    key, status = zotero_client.add_paper(paper_factory())
+    assert (key, status) == ("KEPT", "requeued")
     # rejoined the queue collection, no duplicate record created
     assert kept["data"]["collections"] == ["TOPICAL", "COLL"]
     assert fake_api.created == []
@@ -511,10 +520,10 @@ def test_collection_key_case_insensitive_and_create(fake_api):
 
 
 def test_add_paper_files_into_extra_collections(fake_api, paper_factory):
-    _, created = zotero_client.add_paper(
+    _, status = zotero_client.add_paper(
         paper_factory(), collections=["Bayesian Methods"]
     )
-    assert created is True
+    assert status == "created"
     # new item lands in the queue AND the topical collection
     assert fake_api.created[0]["collections"] == ["COLL", "NEWCOLL"]
 
@@ -529,10 +538,10 @@ def test_add_existing_paper_gains_collections(fake_api, paper_factory):
             },
         }
     ]
-    key, created = zotero_client.add_paper(
+    key, status = zotero_client.add_paper(
         paper_factory(), collections=["Topical"]
     )
-    assert (key, created) == ("EXISTING", False)
+    assert (key, status) == ("EXISTING", "already_queued")
     assert fake_api.queue[0]["data"]["collections"] == ["COLL", "NEWCOLL"]
 
 
