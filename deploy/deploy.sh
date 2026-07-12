@@ -347,11 +347,11 @@ Connect a client:
       --header "Authorization: Bearer <your MCP_AUTH_TOKEN>"
   Claude API: pass the token as authorization_token on the MCP
     connector.
-  claude.ai / mobile: check your Add-connector dialog. If it has a
-    beta "Request headers" section (rolling out slowly), paste the
-    bearer header there; if it shows only URL + OAuth fields, you
-    need the OAuth path (FastMCP providers — roadmapped). See the
-    README's "Connecting clients" table.
+  claude.ai / mobile: add a custom connector with URL ${URL}/mcp and
+    the OAuth fields left empty (requires the Google OAuth variables
+    in .env — see docs/deploy.md). If your Add-connector dialog has
+    the beta "Request headers" section instead, the bearer header
+    works there too.
 
 Cost guardrails in place: max 1 instance, scales to zero when idle,
 free-tier region (the free tier is shared across your billing
