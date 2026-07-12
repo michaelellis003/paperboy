@@ -11,8 +11,9 @@ as the source of truth. Ask Claude for a reading list, then say "queue
 them and send to my Kindle." (MCP is the plugin protocol Claude uses:
 this program runs on your machine or your cloud project, and Claude
 calls its tools during conversation.) Works locally in Claude Code and
-Claude Desktop; remote use via Cloud Run is covered in
-[docs/deploy.md](docs/deploy.md).
+Claude Desktop; a Cloud Run deployment adds claude.ai and the Claude
+mobile app, so papers can be sent from a phone
+([docs/deploy.md](docs/deploy.md)).
 
 Zotero itself is optional: without it you can still search and send
 papers one-off. The reading queue, collections, and duplicate
@@ -121,8 +122,11 @@ normally costs $0 to run:
 uv run paperboy setup && ./deploy/deploy.sh my-paperboy-project
 ```
 
+Claude Code and API clients connect with the bearer token; claude.ai
+and the mobile app connect through a Google sign-in restricted to your
+account (one extra one-time setup step — the script prints it).
 [docs/deploy.md](docs/deploy.md) covers what the script sets up, the
-security model, cost bounds, and which Claude clients can connect.
+security model, and cost bounds.
 
 ## Development
 
