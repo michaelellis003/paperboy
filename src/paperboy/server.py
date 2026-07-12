@@ -653,6 +653,32 @@ def file_papers(refs: list[str], collection: str) -> str:
 
 
 @mcp.tool
+def unfile_papers(refs: list[str], collection: str) -> str:
+    """Remove papers from one Zotero collection, and nothing else.
+
+    The inverse of file_papers, for misfiled items: membership in the
+    named collection is dropped, while the item, its other collections
+    (including the Reading Queue), and its sent-state are untouched.
+    To move a paper between collections, file it into the new one and
+    unfile it from the old. Refs match like remove_from_queue: exact
+    arXiv id, DOI, URL, or title, against the collection's items.
+    """
+    zotero_client.ensure_configured()
+    if not collection.strip():
+        return "Nothing removed: the collection name must be non-empty."
+    try:
+        removed, misses = zotero_client.unfile_by_refs(refs, collection)
+    except ValueError as exc:
+        return f"Nothing removed: {exc}"
+    receipt = f"Removed {len(removed)} item(s) from '{collection}'"
+    if removed:
+        receipt += ": " + "; ".join(removed)
+    if misses:
+        receipt += f" | Not found in that collection: {'; '.join(misses)}"
+    return receipt
+
+
+@mcp.tool
 def list_queue() -> list[dict]:
     """List the Zotero Reading Queue with delivery status per item.
 

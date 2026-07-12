@@ -470,6 +470,35 @@ def test_file_by_refs(fake_api):
     assert fake_api.queue[0]["data"]["collections"] == ["NEWCOLL"]
 
 
+def test_unfile_by_refs_drops_only_that_membership(fake_api):
+    fake_api.existing_collections.append(
+        {"key": "TOPIC", "data": {"name": "Topical"}}
+    )
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Alpha",
+                "DOI": "10.1000/alpha",
+                "collections": ["COLL", "TOPIC"],
+            },
+        }
+    ]
+    removed, misses = zotero_client.unfile_by_refs(
+        ["10.1000/alpha", "missing-ref"], "Topical"
+    )
+    assert removed == ["Alpha"]
+    assert misses == ["missing-ref"]
+    # Queue membership survives; only the topical collection is dropped.
+    assert fake_api.queue[0]["data"]["collections"] == ["COLL"]
+    assert fake_api.deleted == []
+
+
+def test_unfile_by_refs_unknown_collection_raises(fake_api):
+    with pytest.raises(ValueError, match="No collection named"):
+        zotero_client.unfile_by_refs(["10.1/x"], "Nonexistent")
+
+
 def test_creates_missing_collection(fake_api, paper_factory):
     fake_api.existing_collections = [
         {"key": "OTHER", "data": {"name": "Something Else"}}

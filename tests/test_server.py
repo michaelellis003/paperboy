@@ -836,6 +836,33 @@ def test_file_papers_rejects_empty_name(env, zotero_ok):
     assert "must be non-empty" in receipt
 
 
+def test_unfile_papers_tool(env, zotero_ok, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "unfile_by_refs",
+        lambda refs, name: (["Paper A"], ["nope"]),
+    )
+    receipt = server.unfile_papers(["10.1/a", "nope"], "Bayesian Methods")
+    assert "Removed 1 item(s) from 'Bayesian Methods'" in receipt
+    assert "Paper A" in receipt
+    assert "Not found in that collection: nope" in receipt
+
+
+def test_unfile_papers_unknown_collection(env, zotero_ok, monkeypatch):
+    def raise_missing(refs, name):
+        raise ValueError(f"No collection named {name!r}.")
+
+    monkeypatch.setattr(zotero_client, "unfile_by_refs", raise_missing)
+    receipt = server.unfile_papers(["10.1/a"], "Ghost")
+    assert "Nothing removed" in receipt
+    assert "Ghost" in receipt
+
+
+def test_unfile_papers_rejects_empty_name(env, zotero_ok):
+    receipt = server.unfile_papers(["10.1/a"], "  ")
+    assert "must be non-empty" in receipt
+
+
 def test_list_queue_tool(env, monkeypatch):
     entries = [{"title": "T", "ref": "10.1/x", "status": "unsent", "added": ""}]
     monkeypatch.setattr(zotero_client, "list_queue", lambda: entries)

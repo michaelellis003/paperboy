@@ -55,6 +55,7 @@ silently.
 | `queue_papers` | Add papers to the Zotero Reading Queue without sending (optionally filed into topical collections) |
 | `list_collections` | List Zotero collections so Claude can propose where to file a paper, or ask you |
 | `file_papers` | File queued papers into a topical collection (created on demand; queue membership unaffected) |
+| `unfile_papers` | Remove papers from one collection — for misfiled items; the papers themselves and their queue/sent state are untouched |
 | `list_queue` | Show the queue with per-item status (unsent / sent / no-open-access-pdf) |
 | `remove_from_queue` | Delete queue items by exact ref or title |
 | `send_queue` | Send every unsent queue item (auto-split under email limits), then tag as sent |

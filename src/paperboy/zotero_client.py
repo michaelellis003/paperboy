@@ -235,6 +235,37 @@ def file_by_refs(
     return filed, misses
 
 
+def unfile_by_refs(
+    refs: list[str], collection_name: str
+) -> tuple[list[str], list[str]]:
+    """Remove items from one collection without touching anything else.
+
+    The inverse of file_by_refs: membership in the named collection is
+    dropped; the item itself, its other collections (including the
+    Reading Queue), and its sent-state all stay as they are. Matching
+    is the same exact-only logic as removal, against the collection's
+    own items. Returns (removed titles, refs that matched nothing).
+    Raises ValueError when the collection does not exist.
+    """
+    key = collection_key(collection_name)
+    if key is None:
+        raise ValueError(f"No collection named {collection_name!r}.")
+    api = _api()
+    items = api.everything(api.collection_items_top(key))
+    removed, misses = [], []
+    for ref in refs:
+        match = next(
+            (item for item in items if _ref_matches(ref, item["data"])),
+            None,
+        )
+        if match is None:
+            misses.append(ref)
+            continue
+        api.deletefrom_collection(key, match)
+        removed.append(match["data"].get("title", match["key"]))
+    return removed, misses
+
+
 def seed_ids(limit: int = 10) -> list[str]:
     """S2-style seed ids (ArXiv:/DOI: prefixed) from the queue.
 
