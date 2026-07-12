@@ -299,3 +299,46 @@ def test_probe_pdf_size_ignores_implausibly_small(monkeypatch, paper_factory):
         ),
     )
     assert resolver.probe_pdf_size(paper_factory()) is None
+
+
+def test_landing_urls_fail_fast_without_backends(monkeypatch):
+    # A publisher landing URL is deterministically unresolvable; it
+    # must get the permanent hint even when search backends are down
+    # (no backend call at all).
+    def never(q, max_results):
+        raise AssertionError("search backend must not be called")
+
+    monkeypatch.setattr(openalex, "search", never)
+    monkeypatch.setattr(arxiv, "search", never)
+    with pytest.raises(ValueError, match="publisher landing URLs"):
+        resolver.resolve("https://www.nature.com/articles/s41586-020-2649-2")
+
+
+def test_download_any_transient_failure_wins_classification(
+    monkeypatch, paper_factory
+):
+    # bioRxiv 503 then medRxiv 404 (the mirror's guaranteed miss): the
+    # transient failure must win, or a blip earns a permanent tag.
+    from paperboy.models import Paper
+
+    paper = Paper(
+        title="BioRxiv Flaky",
+        authors=[],
+        abstract="",
+        published="2024",
+        url="u",
+        pdf_url=None,
+        doi="10.1101/2024.01.01.573000",
+    )
+
+    def route(request):
+        if "biorxiv.org" in str(request.url):
+            return httpx.Response(503)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        resolver, "client", httpx.Client(transport=httpx.MockTransport(route))
+    )
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        resolver.download_pdf(paper)
+    assert excinfo.value.response.status_code == 503

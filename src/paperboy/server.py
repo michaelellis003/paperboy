@@ -209,6 +209,17 @@ def recommend_papers(
         pool = "recent" if recent_only else "all-cs"
         try:
             graph_arm = s2.recommend(seeds, pool=pool, limit=max_results * 2)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                problems.append(
+                    "citation-graph arm rate-limited — its picks are "
+                    "missing; wait a minute and retry"
+                )
+            else:
+                problems.append(
+                    "citation-graph arm unreachable "
+                    f"({type(exc).__name__}) — its picks are missing"
+                )
         except httpx.HTTPError as exc:
             problems.append(
                 "citation-graph arm unreachable "
@@ -398,7 +409,13 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
             status = exc.response.status_code
             # 429 (throttle) and 408 (timeout) are transient — only the
             # remaining 4xx mean the ref itself will never resolve.
-            if status < 500 and status not in (408, 429):
+            if status == 422:
+                problems.append(
+                    f"open-access lookup rejected the request for {ref} "
+                    "(HTTP 422) — check that CONTACT_EMAIL is a valid "
+                    "email address"
+                )
+            elif status < 500 and status not in (408, 429):
                 problems.append(
                     f"could not resolve: {ref} (backend rejected the "
                     f"request: HTTP {status})"
@@ -665,17 +682,27 @@ def send_papers(
     receipt, delivered = _deliver(documents)
 
     if settings().zotero_enabled:
-        for paper in resolved:
-            item_key, _ = zotero_client.add_paper(
-                paper, collections=collections
+        # The delivery already happened: a Zotero outage here must not
+        # destroy the receipt, or the model retries and re-delivers.
+        try:
+            for paper in resolved:
+                item_key, _ = zotero_client.add_paper(
+                    paper, collections=collections
+                )
+                if paper.safe_filename in delivered:
+                    zotero_client.mark_sent(item_key)
+                elif not paper.pdf_url or id(paper) in junk_keys:
+                    zotero_client.mark_no_pdf(item_key)
+        except Exception as exc:
+            receipt += (
+                " | WARNING: delivered, but recording in Zotero failed "
+                f"({type(exc).__name__}) — duplicate protection is not "
+                "in place for these papers, so do NOT re-send them"
             )
-            if paper.safe_filename in delivered:
-                zotero_client.mark_sent(item_key)
-            elif not paper.pdf_url or id(paper) in junk_keys:
-                zotero_client.mark_no_pdf(item_key)
-        receipt += " (recorded in Zotero Reading Queue)"
-        if collections:
-            receipt += f" (filed under: {'; '.join(collections)})"
+        else:
+            receipt += " (recorded in Zotero Reading Queue)"
+            if collections:
+                receipt += f" (filed under: {'; '.join(collections)})"
     if no_pdf:
         titles = "; ".join(paper.title for paper in no_pdf)
         note = (
@@ -1025,10 +1052,19 @@ def send_queue() -> str:
     documents = [(name, content) for _, name, content in downloaded]
     receipt, delivered = _deliver(documents)
     marked = [item_key for item_key, name, _ in downloaded if name in delivered]
-    for item_key in marked:
-        zotero_client.mark_sent(item_key)
-    if marked:
-        receipt += " (tagged sent in Zotero)"
+    try:
+        for item_key in marked:
+            zotero_client.mark_sent(item_key)
+    except Exception as exc:
+        receipt += (
+            " | WARNING: delivered, but tagging sent in Zotero failed "
+            f"({type(exc).__name__}) — these papers will look unsent, "
+            "so do NOT re-run send_queue until Zotero is reachable and "
+            "you have tagged or removed them"
+        )
+    else:
+        if marked:
+            receipt += " (tagged sent in Zotero)"
     if skipped:
         receipt += f" | Skipped: {'; '.join(skipped)}"
     return receipt

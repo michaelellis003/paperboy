@@ -1510,3 +1510,37 @@ def test_search_429_advice_matches_source(env, monkeypatch):
     with pytest.raises(RuntimeError) as excinfo:
         server.search_papers("q", source="arxiv")
     assert "use source='arxiv'" not in str(excinfo.value)
+
+
+def test_send_papers_receipt_survives_zotero_outage_after_delivery(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    # Delivery already happened; a Zotero outage during bookkeeping
+    # must not destroy the receipt (a lost receipt invites a re-send).
+    def zotero_down(paper, collections=None):
+        raise httpx.ConnectError("zotero.org unreachable")
+
+    monkeypatch.setattr(zotero_client, "add_paper", zotero_down)
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    receipt = server.send_papers(["2401.12345"])
+    assert len(sent_documents) == 1
+    assert "Sent 1 document(s)" in receipt
+    assert "WARNING: delivered, but recording in Zotero failed" in receipt
+    assert "do NOT re-send" in receipt
+
+
+def test_send_queue_receipt_survives_zotero_outage_after_delivery(
+    env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    items = [{"key": "GOOD", "data": {"url": "https://arxiv.org/abs/1.1"}}]
+    monkeypatch.setattr(zotero_client, "unsent_queue_items", lambda: items)
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+
+    def tag_down(key):
+        raise httpx.ConnectError("zotero.org unreachable")
+
+    monkeypatch.setattr(zotero_client, "mark_sent", tag_down)
+    receipt = server.send_queue()
+    assert len(sent_documents) == 1
+    assert "Sent 1 document(s)" in receipt
+    assert "WARNING: delivered, but tagging sent in Zotero failed" in receipt

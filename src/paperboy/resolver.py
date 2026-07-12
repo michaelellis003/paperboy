@@ -75,18 +75,22 @@ def resolve(ref: str) -> Paper:
         return arxiv.get_paper(ref)
     except ValueError:
         pass
+    if ref.strip().lower().startswith(("http://", "https://")):
+        # Any URL that survived the DOI and arXiv branches is a
+        # publisher landing page. Title search can never rescue it
+        # (a URL won't fuzzy-match a title), so fail fast with the
+        # permanent hint — even mid-throttle, when a backend call
+        # here would misreport this as a transient failure.
+        raise ValueError(
+            f"Could not resolve {ref!r}: publisher landing URLs are "
+            "not supported — try the DOI or exact title"
+        )
     paper = _resolve_title(ref)
     if paper:
         return paper
-    hint = (
-        " (publisher landing URLs are not supported — try the DOI or "
-        "exact title)"
-        if ref.startswith(("http://", "https://"))
-        else ""
-    )
     raise ValueError(
         f"Could not resolve {ref!r} as an arXiv id, DOI, or "
-        f"confidently-matching title{hint}"
+        "confidently-matching title"
     )
 
 
@@ -114,20 +118,29 @@ def _candidate_pdf_urls(paper: Paper) -> list[str]:
 def download_pdf(paper: Paper) -> bytes:
     """Download the paper's PDF, falling back to arXiv on dead links.
 
-    Raises ValueError when failure is deterministic (no candidate URL,
-    or every URL served non-PDF junk); re-raises the httpx error when
-    the last failure was transport-level, so callers can leave the
-    paper unsent for retry instead of writing it off as PDF-less.
+    Raises ValueError only when failure is deterministic for every
+    candidate URL (dead links, non-PDF junk); if ANY candidate failed
+    transiently (timeout, 5xx, 429), that httpx error is re-raised so
+    callers leave the paper unsent for retry instead of writing it
+    off as PDF-less.
     """
     urls = _candidate_pdf_urls(paper)
     if not urls:
         raise ValueError(f"No open-access PDF available for: {paper.title}")
     last_error: Exception | None = None
+    transient_error: httpx.HTTPError | None = None
     for url in urls:
         try:
             response = client.get(url)
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in (408, 429) or status >= 500:
+                transient_error = transient_error or exc
+            last_error = exc
+            continue
         except httpx.HTTPError as exc:
+            transient_error = transient_error or exc
             last_error = exc
             continue
         # OA links sometimes return HTTP 200 with an HTML anti-bot or
@@ -140,13 +153,11 @@ def download_pdf(paper: Paper) -> bytes:
             )
             continue
         return response.content
-    if isinstance(last_error, httpx.HTTPStatusError):
-        status = last_error.response.status_code
-        if status in (408, 429) or status >= 500:
-            raise last_error
-    elif isinstance(last_error, httpx.HTTPError):
-        # Transport-level (timeout, DNS, reset): transient by nature.
-        raise last_error
+    if transient_error is not None:
+        # ANY candidate failing transiently means retry might succeed:
+        # a bioRxiv 503 followed by the medRxiv mirror's guaranteed 404
+        # must not read as "no usable PDF" and earn a permanent tag.
+        raise transient_error
     # Deterministic: dead links (404) or non-PDF payloads on every
     # candidate URL — retrying won't change the outcome.
     raise ValueError(
