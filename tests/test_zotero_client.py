@@ -1,6 +1,7 @@
 import pytest
 
 from paperboy import zotero_client
+from paperboy.books import Book
 
 
 class FakeZotero:
@@ -29,6 +30,11 @@ class FakeZotero:
     def create_collections(self, payload):
         self.created_collections = getattr(self, "created_collections", [])
         self.created_collections.append(payload[0]["name"])
+        # Register it so key->name lookups (collection membership on
+        # receipts) resolve the collection we just created.
+        self.existing_collections.append(
+            {"key": "NEWCOLL", "data": {"name": payload[0]["name"]}}
+        )
         return {"successful": {"0": {"key": "NEWCOLL"}}}
 
     def collection_items_top(self, key, **kwargs):
@@ -45,7 +51,18 @@ class FakeZotero:
         return self.queue + self.library_items
 
     def item_template(self, item_type):
-        return {"itemType": item_type}
+        # Mirror pyzotero: the template carries exactly the fields valid
+        # for the type. Only paper-ish types have a DOI field; book and
+        # kin do not, so writing DOI to them would be rejected.
+        template = {"itemType": item_type}
+        if item_type in ("journalArticle", "preprint", "conferencePaper"):
+            template["DOI"] = ""
+        return template
+
+    def attachment_simple(self, files, parentid=None):
+        self.attached = getattr(self, "attached", [])
+        self.attached.append((parentid, list(files)))
+        return {"success": {"0": "AKEY"}, "failure": {}, "unchanged": {}}
 
     def create_items(self, payload):
         if self.fail_create:
@@ -718,3 +735,176 @@ def test_matching_items_accepts_lowercase_key(fake_api):
     removed, misses, _ = zotero_client.remove_by_refs(["imjqvddx"])
     assert [e["title"] for e in removed] == ["T"]
     assert misses == []
+
+
+# --- catalog_paper (track-only) ----------------------------------------
+
+
+def test_catalog_paper_does_not_queue(fake_api, paper_factory):
+    key, status, names = zotero_client.catalog_paper(
+        paper_factory(), collections=["Theory"]
+    )
+    assert (key, status) == ("NEWITEM", "created")
+    item = fake_api.created[0]
+    # Filed into the topical collection only, never the Reading Queue.
+    assert item["collections"] == ["NEWCOLL"]
+    assert "COLL" not in item["collections"]
+    assert names == ["Theory"]
+
+
+def test_catalog_paper_existing_reports_membership(fake_api, paper_factory):
+    fake_api.library_items = [
+        {
+            "key": "EX",
+            "data": {
+                "itemType": "journalArticle",
+                "DOI": "10.1/x",
+                "title": "A Test Paper",
+                "collections": ["COLL"],
+            },
+        }
+    ]
+    key, status, names = zotero_client.catalog_paper(
+        paper_factory(arxiv_id=None, doi="10.1/x")
+    )
+    assert (key, status) == ("EX", "existing")
+    assert names == ["Reading Queue"]
+
+
+# --- add_book ----------------------------------------------------------
+
+
+def test_add_book_creates_book_item(fake_api):
+    book = Book(
+        title="Lebesgue Measure",
+        authors=["Gail Nelson"],
+        year="2015",
+        publisher="AMS",
+        isbn="9781470421991",
+        num_pages="221",
+    )
+    key, status, _ = zotero_client.add_book(book, collections=["Textbooks"])
+    assert (key, status) == ("NEWITEM", "created")
+    item = fake_api.created[0]
+    assert item["itemType"] == "book"
+    assert item["ISBN"] == "9781470421991"
+    assert item["publisher"] == "AMS"
+    assert item["numPages"] == "221"
+    assert "DOI" not in item  # book has no DOI field
+    assert item["collections"] == ["NEWCOLL"]
+
+
+def test_add_book_stores_doi_in_extra(fake_api):
+    book = Book(title="X", authors=[], doi="10.1090/stml/078")
+    zotero_client.add_book(book)
+    assert fake_api.created[0]["extra"] == "DOI: 10.1090/stml/078"
+
+
+def test_add_book_dedups_on_isbn_10_13_equivalence(fake_api):
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "ISBN": "978-0-306-40615-7",
+                "title": "Something",
+                "collections": [],
+            },
+        }
+    ]
+    # Same edition, given as ISBN-10 this time.
+    book = Book(title="Something", authors=[], isbn="0-306-40615-2")
+    key, status, _ = zotero_client.add_book(book)
+    assert (key, status) == ("BK", "existing")
+    assert fake_api.created == []
+
+
+def test_paper_does_not_dedup_against_a_book(fake_api, paper_factory):
+    # A paper titled the same as a book must NOT match the book.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "title": "Deep Learning",
+                "collections": [],
+            },
+        }
+    ]
+    paper = paper_factory(title="Deep Learning", arxiv_id=None, doi="10.1/dl")
+    assert zotero_client.find_item(paper) is None
+
+
+@pytest.mark.parametrize(
+    "grey_type",
+    ["report", "thesis", "manuscript", "document", "conferencePaper"],
+)
+def test_paper_does_not_title_match_grey_lit_item(
+    fake_api, paper_factory, grey_type
+):
+    # A paper resolved by title must NOT fuzzy-match a same-titled item
+    # that attach_pdf can create (report/thesis/...), which would clobber
+    # that grey-lit item's delivery state.
+    fake_api.library_items = [
+        {
+            "key": "GREY",
+            "data": {
+                "itemType": grey_type,
+                "title": "Deep Learning",
+                "collections": [],
+            },
+        }
+    ]
+    # No shared id — only the fuzzy title bridge could (wrongly) match.
+    paper = paper_factory(title="Deep Learning", arxiv_id=None, doi="10.1/dl")
+    assert zotero_client.find_item(paper) is None
+
+
+def test_exact_doi_still_dedups_across_item_types(fake_api, paper_factory):
+    # An exact DOI/arXiv id is identity-safe: it should still match even
+    # when the stored item is not a preprint/journalArticle.
+    fake_api.library_items = [
+        {
+            "key": "R1",
+            "data": {
+                "itemType": "report",
+                "DOI": "10.1/shared",
+                "title": "Whatever",
+                "collections": [],
+            },
+        }
+    ]
+    paper = paper_factory(title="Different", arxiv_id=None, doi="10.1/shared")
+    item = zotero_client.find_item(paper)
+    assert item is not None and item["key"] == "R1"
+
+
+# --- attach_pdf_item ---------------------------------------------------
+
+
+def test_attach_pdf_item_creates_and_attaches(fake_api):
+    key, attached = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=["Jane Doe"],
+        pdf_path="/tmp/A_Working_Paper.pdf",
+        year="2024",
+        collections=["Grey Lit"],
+    )
+    assert key == "NEWITEM"
+    assert attached is True
+    item = fake_api.created[0]
+    assert item["itemType"] == "report"
+    assert item["collections"] == ["NEWCOLL"]
+    assert fake_api.attached == [("NEWITEM", ["/tmp/A_Working_Paper.pdf"])]
+
+
+def test_item_collection_names(fake_api):
+    fake_api.existing_collections.append(
+        {"key": "K2", "data": {"name": "Theory"}}
+    )
+    item = {"data": {"collections": ["COLL", "K2"]}}
+    assert zotero_client.item_collection_names(item) == [
+        "Reading Queue",
+        "Theory",
+    ]

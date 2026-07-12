@@ -11,6 +11,7 @@ from .models import Paper
 from .net import client
 
 _API = "https://api.semanticscholar.org/recommendations/v1/papers/"
+_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 _FIELDS = (
     "title,abstract,year,publicationDate,authors,externalIds,openAccessPdf"
 )
@@ -44,6 +45,21 @@ def _parse(rec: dict) -> Paper:
         arxiv_id=arxiv_id,
         doi=doi,
     )
+
+
+def search_title(query: str, limit: int = 5) -> list[Paper]:
+    """Relevance-ranked papers for a title query via the graph search API.
+
+    A title-resolution fallback for works OpenAlex and arXiv rank poorly
+    (well-known textbooks and older papers often have a Semantic Scholar
+    record when the others miss).
+    """
+    response = client.get(
+        _SEARCH_API,
+        params={"query": query, "fields": _FIELDS, "limit": limit},
+    )
+    response.raise_for_status()
+    return [_parse(rec) for rec in response.json().get("data", [])]
 
 
 def recommend(

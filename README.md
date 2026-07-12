@@ -6,14 +6,19 @@
 
 ![Claude finding three papers, filing them in Zotero, and sending two to a Kindle](assets/paperboy-demo.gif)
 
-An MCP server that delivers research papers to your e-reader, with Zotero
-as the source of truth. Ask Claude for a reading list, then say "queue
-them and send to my Kindle." (MCP is the plugin protocol Claude uses:
-this program runs on your machine or your cloud project, and Claude
-calls its tools during conversation.) Works locally in Claude Code and
-Claude Desktop; a Cloud Run deployment adds claude.ai and the Claude
-mobile app, so papers can be sent from a phone
+An MCP server that delivers research papers and books to your e-reader,
+with Zotero as the source of truth. Ask Claude for a reading list, then
+say "queue them and send to my Kindle." (MCP is the plugin protocol
+Claude uses: this program runs on your machine or your cloud project,
+and Claude calls its tools during conversation.) Works locally in Claude
+Code and Claude Desktop; a Cloud Run deployment adds claude.ai and the
+Claude mobile app, so papers can be sent from a phone
 ([docs/deploy.md](docs/deploy.md)).
+
+Two things are kept separate: **delivering** a paper to your device and
+**cataloguing** a work in Zotero. You can do either. A book you own, a
+paywalled reference, or a PDF you already have can all be tracked in the
+library without being staged for the e-reader.
 
 Zotero itself is optional: without it you can still search and send
 papers one-off. The reading queue, collections, and duplicate
@@ -36,8 +41,18 @@ deliver them. What that looks like in practice:
   collections at once, so filing never disturbs the queue.
 - Papers are found by arXiv id, DOI, or title (a close-enough title
   match, so a reading list Claude wrote in the chat can be sent as-is).
-  When a paper can't be found or has no free PDF, the receipt says so.
-  Nothing is dropped silently.
+  When a title matches only loosely, paperboy offers the closest
+  candidate to confirm rather than guessing or failing silently.
+- Books work too: `add_book` resolves an ISBN, a book DOI, or a title
+  into a proper Zotero **book** item (publisher, edition, ISBN, pages).
+  Books are catalogued, not delivered.
+- Have the PDF already (a working paper, lecture notes, an open-access
+  textbook)? `attach_pdf` files it in Zotero with the PDF attached,
+  using metadata you give it, and can send it to the e-reader in the
+  same step.
+- When a reference can't be resolved, the receipt says *why* and which
+  tool fits, rather than sending you hunting for a better URL. A paper
+  with no open-access PDF is a normal library record, not an error.
 
 Zotero holds all of this, so the server keeps no state of its own: no
 database to run, and safe to redeploy at any time.
@@ -57,6 +72,9 @@ database to run, and safe to redeploy at any time.
 | `recommend_papers` | Discover related or new papers: citation-graph recommendations (Semantic Scholar) seeded from your Zotero library, plus keyword discovery from interests Claude distills out of the conversation. Excludes papers you already have |
 | `send_papers` | One-off send by arXiv id, DOI, URL, or title (also records in Zotero if configured) |
 | `queue_papers` | Add papers to the Zotero Reading Queue without sending (optionally filed into topical collections) |
+| `add_to_library` | Track papers in Zotero **without** queueing or sending them (owned, paywalled, or read-later); a missing OA PDF is not treated as a failure |
+| `add_book` | Catalogue a book by ISBN, book DOI, or title as a Zotero `book` item (Crossref, Open Library, Google Books); never delivered |
+| `attach_pdf` | Ingest a PDF you already have (grey literature, open-access textbooks) with the PDF attached and metadata you supply; optionally send it |
 | `list_collections` | List Zotero collections so Claude can propose where to file a paper, or ask you |
 | `file_papers` | File queued papers into a topical collection (created on demand; queue membership unaffected) |
 | `unfile_papers` | Remove papers from one collection (for misfiled items); the papers themselves and their queue/sent state are untouched |

@@ -9,17 +9,46 @@ the e-reader is worse than a lookup failure.
 """
 
 import difflib
+from urllib.parse import urlsplit
 
 import httpx
 
-from . import arxiv, doi, models, openalex
+from . import arxiv, doi, models, openalex, s2
 from .models import Paper, normalize_title
 from .net import client
 
+# Auto-accept a title match at or above this; offer (never auto-use) a
+# plausible one in [_OFFER, _MATCH); reject anything below _OFFER.
 _TITLE_MATCH_THRESHOLD = 0.8
+_TITLE_OFFER_THRESHOLD = 0.65
 
 
-def _best_title_match(ref: str, candidates: list[Paper]) -> Paper | None:
+class AmbiguousTitleError(ValueError):
+    """A title matched a candidate plausibly but not confidently.
+
+    Subclasses ValueError so every existing resolve() caller declines to
+    auto-use the candidate — the "a wrong paper on the e-reader is worse
+    than a lookup failure" invariant holds unchanged. Only _resolve_all
+    inspects ``candidate`` to offer a "did you mean" the user confirms.
+    """
+
+    def __init__(self, candidate: Paper) -> None:
+        self.candidate = candidate
+        ref = candidate.arxiv_id or candidate.doi
+        who = candidate.authors[0] if candidate.authors else "unknown author"
+        year = (candidate.published or "")[:4]
+        year_note = f" ({year})" if year else ""
+        super().__init__(
+            f"No confident title match. Did you mean {candidate.title!r} "
+            f"by {who}{year_note}? Confirm with the user before re-running "
+            f"with ref {ref!r} — do not assume it is the right paper."
+        )
+
+
+def _best_title_match(
+    ref: str, candidates: list[Paper]
+) -> tuple[Paper | None, float]:
+    """Closest candidate to ``ref`` and its similarity ratio."""
     best, best_ratio = None, 0.0
     for paper in candidates:
         ratio = difflib.SequenceMatcher(
@@ -27,40 +56,105 @@ def _best_title_match(ref: str, candidates: list[Paper]) -> Paper | None:
         ).ratio()
         if ratio > best_ratio:
             best, best_ratio = paper, ratio
-    return best if best_ratio >= _TITLE_MATCH_THRESHOLD else None
+    return best, best_ratio
 
 
 def _resolve_title(ref: str) -> Paper | None:
-    # Scan several hits: relevance ranking sometimes puts a derivative
-    # work first (e.g. Sentence-BERT above BERT for the exact BERT
-    # title), and arXiv covers canonical records OpenAlex ranks poorly.
-    hit = None
+    # Try each backend in turn, keeping the strongest match across all of
+    # them: relevance ranking sometimes puts a derivative work first, and
+    # each backend covers records the others rank poorly (arXiv for
+    # canonical preprints, Semantic Scholar for textbooks/older papers
+    # OpenAlex misses). Stop early once a confident match appears.
+    searches = (
+        lambda: openalex.search(ref, max_results=5),
+        lambda: arxiv.search(ref, max_results=5),
+        lambda: s2.search_title(ref, limit=5),
+    )
+    best: Paper | None = None
+    best_ratio = 0.0
     backend_error: httpx.HTTPError | None = None
-    try:
-        hit = _best_title_match(ref, openalex.search(ref, max_results=5))
-    except httpx.HTTPError as exc:
-        backend_error = exc
-    if hit is None:
+    for run in searches:
         try:
-            hit = _best_title_match(ref, arxiv.search(ref, max_results=5))
+            paper, ratio = _best_title_match(ref, run())
         except httpx.HTTPError as exc:
             backend_error = backend_error or exc
-    if hit is None:
-        # A failed search arm must not read as "this title is wrong":
-        # a 429 during an OpenAlex throttle would otherwise tell the
-        # user to go find a DOI when retrying in a minute would work.
-        if backend_error is not None:
-            raise backend_error
-        return None
-    # OpenAlex carries junk duplicate records (wrong DOI/date) for some
-    # papers; when the hit is on arXiv, re-fetch canonical metadata so
-    # the library record and dedup keys are authoritative.
-    if hit.arxiv_id:
-        try:
-            return arxiv.get_paper(hit.arxiv_id)
-        except (ValueError, httpx.HTTPError):
-            pass
-    return hit
+            continue
+        if ratio > best_ratio:
+            best, best_ratio = paper, ratio
+        if best_ratio >= _TITLE_MATCH_THRESHOLD:
+            break
+
+    if best is not None and best_ratio >= _TITLE_MATCH_THRESHOLD:
+        # OpenAlex carries junk duplicate records (wrong DOI/date) for
+        # some papers; when the hit is on arXiv, re-fetch canonical
+        # metadata so the library record and dedup keys are authoritative.
+        if best.arxiv_id:
+            try:
+                return arxiv.get_paper(best.arxiv_id)
+            except (ValueError, httpx.HTTPError):
+                pass
+        return best
+    # A failed search arm must not read as "this title is wrong", and a
+    # throttle must not let a mid-band candidate from another backend
+    # masquerade as the answer — transient failure takes precedence.
+    if backend_error is not None:
+        raise backend_error
+    # Plausible but not confident: offer it, but only when it carries a
+    # concrete id to re-run with. A title-only candidate would re-trigger
+    # the identical mid-band match forever, so it hard-fails instead.
+    if (
+        best is not None
+        and best_ratio >= _TITLE_OFFER_THRESHOLD
+        and (best.arxiv_id or best.doi)
+    ):
+        raise AmbiguousTitleError(best)
+    return None
+
+
+# File-share and code hosts serve HTML, not registry records; a raw PDF
+# is a payload, not a lookup key — each needs its own honest remedy.
+_SHARE_HOSTS = (
+    "github.com",
+    "githubusercontent.com",
+    "gitlab.com",
+    "drive.google.com",
+    "docs.google.com",
+    "dropbox.com",
+)
+_BOOK_HOSTS = ("amazon.", "goodreads.com", "bookstore.")
+
+
+def _classify_url(url: str) -> str:
+    """An honest, case-specific reason a URL can't be resolved.
+
+    The resolver looks works up in registries and follows the registry's
+    OA link; it never fetches a URL. Telling every failure "try the DOI"
+    sends users hunting for better URLs that were never going to help, so
+    each shape gets the remedy that actually fits.
+    """
+    parts = urlsplit(url.lower())
+    host, path = parts.netloc, parts.path
+    if any(share in host for share in _SHARE_HOSTS):
+        return (
+            "this is a file-share or code-host link, not a registry "
+            "record — use attach_pdf with the PDF, or give a DOI, arXiv "
+            "id, or exact title"
+        )
+    if path.endswith(".pdf"):
+        return (
+            "this is a direct PDF link. I resolve works through registries "
+            "(arXiv, Crossref, OpenAlex), not by fetching URLs — use "
+            "attach_pdf to ingest a PDF you already have"
+        )
+    if any(book in host for book in _BOOK_HOSTS) or "/book" in path:
+        return (
+            "this looks like a book (retail or catalog page) — use "
+            "add_book with the ISBN, or the title and author"
+        )
+    return (
+        "publisher landing URLs are not supported — try the DOI or exact "
+        "title, or attach_pdf if you have the PDF"
+    )
 
 
 def resolve(ref: str) -> Paper:
@@ -76,15 +170,12 @@ def resolve(ref: str) -> Paper:
     except ValueError:
         pass
     if ref.strip().lower().startswith(("http://", "https://")):
-        # Any URL that survived the DOI and arXiv branches is a
-        # publisher landing page. Title search can never rescue it
-        # (a URL won't fuzzy-match a title), so fail fast with the
-        # permanent hint — even mid-throttle, when a backend call
-        # here would misreport this as a transient failure.
-        raise ValueError(
-            f"Could not resolve {ref!r}: publisher landing URLs are "
-            "not supported — try the DOI or exact title"
-        )
+        # Any URL that survived the DOI and arXiv branches can't be
+        # resolved by lookup. Title search can never rescue it (a URL
+        # won't fuzzy-match a title), so fail fast with a case-specific
+        # remedy — even mid-throttle, when a backend call here would
+        # misreport this as a transient failure.
+        raise ValueError(f"Could not resolve {ref!r}: {_classify_url(ref)}")
     paper = _resolve_title(ref)
     if paper:
         return paper
@@ -113,6 +204,22 @@ def _candidate_pdf_urls(paper: Paper) -> list[str]:
         if fallback not in urls:
             urls.append(fallback)
     return urls
+
+
+def fetch_pdf(url: str) -> bytes:
+    """Download one URL, verifying the payload is really a PDF.
+
+    Used by attach_pdf to ingest a PDF the user points at directly (no
+    registry record involved). Raises ValueError when the URL serves
+    non-PDF content (an HTML anti-bot or landing page), and re-raises
+    httpx errors for transient transport failures.
+    """
+    response = client.get(url)
+    response.raise_for_status()
+    if b"%PDF-" not in response.content[:1024]:
+        content_type = response.headers.get("content-type", "unknown")
+        raise ValueError(f"{url} returned non-PDF content ({content_type})")
+    return response.content
 
 
 def download_pdf(paper: Paper) -> bytes:

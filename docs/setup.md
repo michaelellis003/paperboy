@@ -29,10 +29,12 @@ each value; the wizard handles the rest.
 
 ## Zotero (optional)
 
-paperboy uses Zotero as its memory: papers land in a Reading Queue
-collection, delivery is recorded as a tag, and duplicates are caught
-across sessions. Without Zotero you can still search and send papers
-one at a time.
+paperboy uses Zotero as its memory: papers you send land in a Reading
+Queue collection, delivery is recorded as a tag, and duplicates are
+caught across sessions. It is also where books, tracked references, and
+PDFs you ingest are catalogued, whether or not they ever go to the
+e-reader. Without Zotero you can still search and send papers one at a
+time.
 
 You need an **API key**, and if you're editing `.env` by hand rather
 than using the wizard, your numeric **userID** as well. Both are on

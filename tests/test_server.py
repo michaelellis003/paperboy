@@ -1544,3 +1544,158 @@ def test_send_queue_receipt_survives_zotero_outage_after_delivery(
     assert len(sent_documents) == 1
     assert "Sent 1 document(s)" in receipt
     assert "WARNING: delivered, but tagging sent in Zotero failed" in receipt
+
+
+# --- add_to_library (track-only) ---------------------------------------
+
+
+def test_add_to_library_catalogs_without_queue(
+    zotero_env, monkeypatch, paper_factory
+):
+    calls = []
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client,
+        "catalog_paper",
+        lambda p, collections=None: (
+            calls.append(collections) or ("K", "created", ["Theory"])
+        ),
+    )
+    result = server.add_to_library(["Some Paper Title"], collections=["Theory"])
+    assert "Added 1 to your library" in result
+    assert "filed under: Theory" in result
+    assert calls == [["Theory"]]
+
+
+def test_add_to_library_reports_existing_membership(
+    zotero_env, monkeypatch, paper_factory
+):
+    monkeypatch.setattr(resolver, "resolve", lambda ref: paper_factory())
+    monkeypatch.setattr(
+        zotero_client,
+        "catalog_paper",
+        lambda p, collections=None: (
+            "K",
+            "existing",
+            ["Theory", "Reading Queue"],
+        ),
+    )
+    result = server.add_to_library(["Some Paper Title"])
+    assert "already in your library" in result
+    assert "currently in: Theory; Reading Queue" in result
+
+
+def test_add_to_library_no_valid_refs(zotero_env, monkeypatch):
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: (_ for _ in ()).throw(ValueError("nope")),
+    )
+    result = server.add_to_library(["bad ref"])
+    assert result.startswith("Nothing was added")
+
+
+# --- add_book ----------------------------------------------------------
+
+
+def test_add_book_catalogs_book(zotero_env, monkeypatch):
+    from paperboy import books
+    from paperboy.books import Book
+
+    monkeypatch.setattr(
+        books,
+        "resolve_book",
+        lambda ident: Book(
+            title="Lebesgue Measure", authors=["Nelson"], isbn="9781470421991"
+        ),
+    )
+    monkeypatch.setattr(
+        zotero_client,
+        "add_book",
+        lambda b, collections=None: ("K", "created", ["Textbooks"]),
+    )
+    result = server.add_book("978-1-4704-2199-1", collections=["Textbooks"])
+    assert "Catalogued book" in result
+    assert "Lebesgue Measure" in result
+    assert "9781470421991" in result
+
+
+def test_add_book_resolution_failure(zotero_env, monkeypatch):
+    from paperboy import books
+
+    monkeypatch.setattr(
+        books,
+        "resolve_book",
+        lambda ident: (_ for _ in ()).throw(ValueError("Closest was 'X' by Y")),
+    )
+    result = server.add_book("some fuzzy title")
+    assert "Could not add book" in result
+    assert "Closest was" in result
+
+
+# --- attach_pdf --------------------------------------------------------
+
+
+def test_attach_pdf_downloads_and_attaches(zotero_env, monkeypatch):
+    import os
+
+    captured = {}
+
+    def fake_attach(**kwargs):
+        captured.update(kwargs)
+        captured["path_exists"] = os.path.exists(kwargs["pdf_path"])
+        return ("K", True)
+
+    monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7 data")
+    monkeypatch.setattr(zotero_client, "attach_pdf_item", fake_attach)
+    result = server.attach_pdf(
+        "https://host/paper.pdf",
+        "A Grey Lit Preprint",
+        ["Author One"],
+        item_type="report",
+        collections=["Grey Lit"],
+    )
+    assert "Added report 'A Grey Lit Preprint'" in result
+    assert "PDF attached" in result
+    assert captured["item_type"] == "report"
+    assert captured["path_exists"] is True  # temp file present during attach
+
+
+def test_attach_pdf_rejects_unknown_item_type(zotero_env):
+    result = server.attach_pdf("http://x/y.pdf", "T", [], item_type="banana")
+    assert "Unsupported item_type" in result
+
+
+def test_attach_pdf_local_path_is_a_directory(zotero_env, tmp_path):
+    # A local path that is a directory (e.g. a dragged folder) must return
+    # a clean receipt, not raise an uncaught IsADirectoryError.
+    result = server.attach_pdf(str(tmp_path), "T", ["A"])
+    assert "Could not read" in result
+
+
+def test_attach_pdf_non_pdf_content(zotero_env, monkeypatch):
+    monkeypatch.setattr(
+        resolver,
+        "fetch_pdf",
+        lambda url: (_ for _ in ()).throw(
+            ValueError("returned non-PDF content")
+        ),
+    )
+    result = server.attach_pdf("https://host/notreally.pdf", "T", [])
+    assert "Could not ingest the PDF" in result
+
+
+def test_attach_pdf_send_delivers(zotero_env, monkeypatch, sent_documents):
+    monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF- bytes")
+    monkeypatch.setattr(
+        zotero_client, "attach_pdf_item", lambda **kw: ("K", True)
+    )
+    result = server.attach_pdf(
+        "https://host/oa-textbook.pdf",
+        "Open Textbook",
+        ["Author"],
+        item_type="book",
+        send=True,
+    )
+    assert "sent to your e-reader" in result
+    assert len(sent_documents) == 1

@@ -6,35 +6,62 @@ sets PORT, which switches on the HTTP transport automatically.
 """
 
 import os
+import re
 import sys
+import tempfile
 from itertools import zip_longest
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-from . import arxiv, delivery, openalex, resolver, s2, zotero_client
+from . import arxiv, books, delivery, openalex, resolver, s2, zotero_client
 from .config import settings
 from .models import Paper, normalize_title
+
+# Zotero item types attach_pdf accepts; all take an "author" creator, so
+# grey literature files correctly rather than as the wrong type.
+_ATTACH_ITEM_TYPES = frozenset(
+    {
+        "journalArticle",
+        "book",
+        "bookSection",
+        "report",
+        "thesis",
+        "preprint",
+        "conferencePaper",
+        "manuscript",
+        "document",
+    }
+)
 
 mcp = FastMCP(
     "paperboy",
     instructions=(
         "Delivers research papers to the user's e-reader (Kindle, Kobo, "
-        "PocketBook, ...) and organizes them in Zotero. Papers are "
-        "referenced by arXiv id, DOI, arXiv/doi.org URL, or title "
-        "(publisher landing URLs won't resolve) — so a reading list "
-        "from research can be sent directly. Use send_papers when the "
-        "user picks specific papers; send_queue flushes EVERY unsent "
-        "queued item, so check list_queue first. Organization: when "
-        "queueing/sending new papers, check list_collections and pass "
-        "collections=[...] to file them topically — propose a fit from "
-        "the paper's topic, and ASK THE USER when the fit is ambiguous "
-        "rather than guessing. Discovery: recommend_papers finds "
-        "related/new work from the user's library plus interests you "
-        "distill from the conversation — present picks, don't send "
-        "unasked. Always relay delivery receipts — including sizes, "
-        "skipped papers, and failures — to the user."
+        "PocketBook, ...) and organizes them, and books, in Zotero. "
+        "Papers are referenced by arXiv id, DOI, arXiv/doi.org URL, or "
+        "title — so a reading list from research can be sent directly. "
+        "Two intents, kept separate: DELIVER vs CATALOGUE. Deliver: "
+        "queue_papers stages for the e-reader, send_papers sends picks, "
+        "send_queue flushes EVERY unsent queued item (check list_queue "
+        "first). Catalogue (track without sending): add_to_library files "
+        "a paper into the library only — use it for owned, paywalled, or "
+        "read-later refs, and for papers with no open-access PDF (that is "
+        "not a failure). add_book catalogues a book by ISBN, book DOI, or "
+        "title as a proper Zotero book item. attach_pdf ingests a PDF the "
+        "user already has (grey literature, open-access textbooks) with "
+        "the PDF attached and metadata you supply, optionally sending it. "
+        "A URL that isn't a DOI/arXiv id/title won't resolve; the error "
+        "says which tool fits (attach_pdf for a PDF, add_book for a book). "
+        "Organization: check list_collections and pass collections=[...] "
+        "to file topically — propose a fit, and ASK THE USER when it is "
+        "ambiguous rather than guessing. Discovery: recommend_papers "
+        "finds related/new work from the user's library plus interests "
+        "you distill from the conversation — present picks, don't send "
+        "unasked. Always relay receipts — sizes, skips, failures, and "
+        "'did you mean' title candidates (confirm before re-running) — "
+        "to the user."
     ),
 )
 
@@ -399,10 +426,17 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
                 ref = from_key
         try:
             paper = resolver.resolve(ref)
+        except resolver.AmbiguousTitleError as exc:
+            # A plausible-but-unconfirmed title. The message is a
+            # self-contained "did you mean" carrying the candidate's ref;
+            # surface it and never auto-use the candidate. (Caught before
+            # the generic ValueError below, which it subclasses.)
+            problems.append(str(exc))
+            continue
         except ValueError as exc:
             # The resolver's message is self-contained and may carry an
-            # actionable hint (e.g. "publisher landing URLs are not
-            # supported") — pass it through verbatim.
+            # actionable hint (e.g. "this is a direct PDF link — use
+            # attach_pdf") — pass it through verbatim.
             problems.append(str(exc))
             continue
         except httpx.HTTPStatusError as exc:
@@ -787,6 +821,220 @@ def queue_papers(refs: list[str], collections: list[str] | None = None) -> str:
         )
     if problems:
         parts.append("; ".join(problems))
+    return " | ".join(parts) + collection_note
+
+
+def _filed_note(collections: list[str] | None) -> str:
+    return f" (filed under: {'; '.join(collections)})" if collections else ""
+
+
+def _membership_note(names: list[str]) -> str:
+    """Where a duplicate already lives, so no separate lookup is needed."""
+    return (
+        f" [currently in: {'; '.join(names)}]"
+        if names
+        else " [in no collection]"
+    )
+
+
+def _slug(title: str) -> str:
+    slug = re.sub(r"[^\w\s-]", "", title).strip()
+    return re.sub(r"\s+", "_", slug)[:80] or "document"
+
+
+def _read_local_pdf(path: str) -> bytes:
+    """Read a local PDF, verifying the payload really is one."""
+    with open(path, "rb") as handle:
+        content = handle.read()
+    if b"%PDF-" not in content[:1024]:
+        raise ValueError(f"{path} is not a PDF")
+    return content
+
+
+@mcp.tool
+def add_to_library(
+    refs: list[str], collections: list[str] | None = None
+) -> str:
+    """Track papers in Zotero WITHOUT staging them for e-reader delivery.
+
+    The "just catalogue it" path, distinct from queue_papers: resolves
+    each ref (arXiv id, DOI, URL, or title) and files it into the library
+    (and any ``collections``, created on demand) but never adds it to the
+    Reading Queue and never sends it. A paper with no open-access PDF is
+    catalogued normally here — it is a library record, not a delivery
+    failure, so nothing is tagged no-oa-pdf. Use this for references you
+    want to keep (owned, paywalled, or read-later) rather than deliver.
+    Duplicates report the collections they already live in. Relay any
+    unresolvable refs to the user.
+    """
+    zotero_client.ensure_configured()
+    collections, collection_note = _clean_collections(collections)
+    refs, blank_note = _drop_blank_refs(refs)
+    if blank_note:
+        collection_note += f" | {blank_note}"
+    resolved, problems = _resolve_all(refs)
+    if not resolved:
+        reason = "; ".join(problems) if problems else "no valid refs given"
+        return f"Nothing was added: {reason}" + collection_note
+
+    created, existing = [], []
+    for paper in resolved:
+        _, status, names = zotero_client.catalog_paper(
+            paper, collections=collections
+        )
+        if status == "created":
+            created.append(paper.title)
+        else:
+            existing.append(f"{paper.title}{_membership_note(names)}")
+
+    parts = []
+    if created:
+        parts.append(
+            f"Added {len(created)} to your library{_filed_note(collections)}: "
+            + "; ".join(created)
+        )
+    if existing:
+        parts.append("already in your library: " + "; ".join(existing))
+    if not created and not existing:
+        parts.append("Nothing new to add")
+    if problems:
+        parts.append("; ".join(problems))
+    return " | ".join(parts) + collection_note
+
+
+@mcp.tool
+def add_book(identifier: str, collections: list[str] | None = None) -> str:
+    """Catalogue a book in Zotero by ISBN, book DOI, or title.
+
+    Resolves an ISBN-10/13, a book DOI, or a title (Crossref, then Open
+    Library, then Google Books) into a proper Zotero ``book`` item with
+    publisher, edition, ISBN, series, and page count — never a
+    journalArticle, which would corrupt citations. Books are catalogued,
+    NOT queued or delivered: to put an open-access textbook PDF on the
+    e-reader, use attach_pdf with item_type="book". Pass ``collections``
+    to file it topically (created on demand). A title that matches only
+    loosely returns the closest candidate for you to confirm rather than
+    guessing. Deduplicates by ISBN.
+    """
+    zotero_client.ensure_configured()
+    collections, collection_note = _clean_collections(collections)
+    if not identifier.strip():
+        return "add_book needs an ISBN, book DOI, or title."
+    try:
+        book = books.resolve_book(identifier)
+    except ValueError as exc:
+        return f"Could not add book: {exc}" + collection_note
+    except httpx.HTTPError as exc:
+        return (
+            f"Book lookup is temporarily unreachable ({type(exc).__name__}) "
+            "— retry." + collection_note
+        )
+    _, status, names = zotero_client.add_book(book, collections=collections)
+    desc = repr(book.title) + (f" ({book.isbn})" if book.isbn else "")
+    if status == "created":
+        return f"Catalogued book {desc}{_filed_note(collections)}." + (
+            collection_note
+        )
+    return (
+        f"Book {desc} is already in your library{_membership_note(names)}"
+        + (
+            f"; also filed under: {'; '.join(collections)}"
+            if collections
+            else ""
+        )
+        + "."
+        + collection_note
+    )
+
+
+@mcp.tool
+def attach_pdf(
+    url_or_path: str,
+    title: str,
+    authors: list[str],
+    item_type: str = "journalArticle",
+    year: str = "",
+    doi: str | None = None,
+    collections: list[str] | None = None,
+    send: bool = False,
+) -> str:
+    """Ingest a PDF you already have into Zotero, with the PDF attached.
+
+    For grey literature and works no registry indexes (author-circulated
+    preprints, lecture notes, working papers, open-access textbooks).
+    Downloads the PDF from an http(s) URL (or reads a local path when
+    running locally), creates a Zotero item of ``item_type`` from the
+    metadata YOU supply, and attaches the PDF to it — no registry lookup,
+    so a title/authors the model already knows is enough. ``item_type``
+    is one of journalArticle, book, bookSection, report, thesis, preprint,
+    conferencePaper, manuscript, document (default journalArticle); use
+    'book' for an open-access textbook PDF. Files into ``collections``
+    (created on demand) and, unlike queue_papers, does NOT queue. With
+    send=True it also delivers the PDF to your e-reader in the same call.
+    Requires Zotero.
+    """
+    zotero_client.ensure_configured()
+    if item_type not in _ATTACH_ITEM_TYPES:
+        return f"Unsupported item_type {item_type!r}. Use one of: " + ", ".join(
+            sorted(_ATTACH_ITEM_TYPES)
+        )
+    if not title.strip():
+        return "attach_pdf needs a title."
+    collections, collection_note = _clean_collections(collections)
+    src = url_or_path.strip()
+    is_url = src.lower().startswith(("http://", "https://"))
+    try:
+        content = resolver.fetch_pdf(src) if is_url else _read_local_pdf(src)
+    except FileNotFoundError:
+        return f"No file found at {src!r}."
+    except OSError as exc:
+        # A local path that is a directory, unreadable, etc. — any other
+        # read failure gets a clean receipt, not an uncaught exception.
+        return f"Could not read {src!r}: {exc}."
+    except ValueError as exc:
+        return f"Could not ingest the PDF: {exc}"
+    except httpx.HTTPError as exc:
+        return (
+            f"Could not download the PDF ({type(exc).__name__}: {exc}) — "
+            "retry, or download it and pass a local path."
+        )
+
+    slug = _slug(title)
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = os.path.join(tmp, f"{slug}.pdf")
+        with open(pdf_path, "wb") as handle:
+            handle.write(content)
+        try:
+            _, attached = zotero_client.attach_pdf_item(
+                item_type=item_type,
+                title=title,
+                authors=authors,
+                pdf_path=pdf_path,
+                year=year,
+                url=src if is_url else "",
+                doi=doi,
+                collections=collections,
+            )
+        except Exception as exc:
+            return (
+                f"Could not create the Zotero item ({type(exc).__name__}: "
+                f"{exc})."
+            )
+
+    parts = [
+        f"Added {item_type} {title!r} to your library{_filed_note(collections)}"
+    ]
+    parts.append(
+        "PDF attached"
+        if attached
+        else "but the PDF attachment did not upload — retry"
+    )
+    if send:
+        receipt, delivered = _deliver([(f"{slug}.pdf", content)])
+        parts.append(
+            ("sent to your e-reader: " if delivered else "send failed: ")
+            + receipt
+        )
     return " | ".join(parts) + collection_note
 
 
