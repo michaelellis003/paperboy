@@ -1004,20 +1004,39 @@ def test_no_pdf_receipt_hints_when_lookup_disabled(
 # --- auth ------------------------------------------------------------------
 
 
-def test_bearer_auth_requires_token(monkeypatch):
+def test_http_auth_requires_token(monkeypatch):
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     with pytest.raises(SystemExit, match="MCP_AUTH_TOKEN"):
-        server._bearer_auth()
+        server._http_auth()
 
 
-def test_bearer_auth_rejects_short_token(monkeypatch):
+def test_http_auth_rejects_short_token(monkeypatch):
     monkeypatch.setenv("MCP_AUTH_TOKEN", "short")
     with pytest.raises(SystemExit):
-        server._bearer_auth()
+        server._http_auth()
 
 
-def test_bearer_auth_accepts_long_token(monkeypatch):
+def test_http_auth_accepts_long_token(monkeypatch):
     token = "x" * 43
     monkeypatch.setenv("MCP_AUTH_TOKEN", token)
-    verifier = server._bearer_auth()
+    for var in (
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "SERVER_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    verifier = server._http_auth()
     assert token in verifier.tokens
+
+
+def test_http_auth_uses_oauth_when_configured(monkeypatch):
+    from paperboy import oauth
+
+    token = "x" * 43
+    monkeypatch.setenv("MCP_AUTH_TOKEN", token)
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "id.apps")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "GOCSPX-x")
+    monkeypatch.setenv("SERVER_BASE_URL", "https://paperboy.example.com")
+    monkeypatch.setenv("OAUTH_ALLOWED_EMAILS", "owner@example.com")
+    auth = server._http_auth()
+    assert isinstance(auth, oauth.PaperboyAuth)

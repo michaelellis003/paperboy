@@ -834,13 +834,20 @@ def setup_status() -> dict:
     }
 
 
-def _bearer_auth() -> StaticTokenVerifier:
-    """Build the bearer-token verifier required for the HTTP transport.
+def _http_auth():
+    """Build authentication for the HTTP transport.
 
     The server can send email as the user, so remote access is never
-    served unauthenticated. The token comes from MCP_AUTH_TOKEN (Cloud
-    Run: mount from Secret Manager) and is pasted into the MCP client's
-    Authorization header.
+    served unauthenticated. Two modes:
+
+    - Bearer token only (default): MCP_AUTH_TOKEN (Cloud Run: mount
+      from Secret Manager) pasted into the client's Authorization
+      header. Works in Claude Code and the API.
+    - Bearer token + Google OAuth: additionally set
+      GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET,
+      SERVER_BASE_URL, and OAUTH_ALLOWED_EMAILS. This adds the OAuth
+      flow claude.ai and the mobile app need; the bearer token keeps
+      working alongside it.
     """
     token = os.environ.get("MCP_AUTH_TOKEN", "")
     if len(token) < 32:
@@ -849,6 +856,10 @@ def _bearer_auth() -> StaticTokenVerifier:
             "Generate one with: python -c "
             "'import secrets; print(secrets.token_urlsafe(32))'"
         )
+    from . import oauth
+
+    if oauth.oauth_configured():
+        return oauth.build_auth(static_token=token)
     return StaticTokenVerifier(
         tokens={token: {"client_id": "paperboy-owner", "scopes": []}}
     )
@@ -870,7 +881,7 @@ def main() -> None:
     load_env_file()
     port = os.environ.get("PORT")
     if port:
-        mcp.auth = _bearer_auth()
+        mcp.auth = _http_auth()
         mcp.run(transport="http", host="0.0.0.0", port=int(port))
     else:
         mcp.run()

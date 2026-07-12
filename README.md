@@ -137,7 +137,8 @@ uv for packaging, ruff (Google style), ty, pytest behind an enforced
       default)
 - [ ] Kindle highlights → Zotero notes round-trip (`My Clippings.txt`
       parser with fuzzy title matching)
-- [ ] OAuth (instead of static bearer token) via FastMCP auth providers
+- [x] Google OAuth for claude.ai and mobile connectors (see
+      [docs/deploy.md](docs/deploy.md))
 
 ## Prior art & acknowledgments
 

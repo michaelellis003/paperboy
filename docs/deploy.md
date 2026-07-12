@@ -44,17 +44,52 @@ but does not cap billing, so act on the 50% alert if it ever fires.
 
 ## Connecting clients to the remote server
 
-Clients differ in whether they accept the static bearer token, so
-check your target client before deploying:
-
-| Client | Works today? |
+| Client | How |
 |---|---|
-| Claude Code | Yes: `claude mcp add --transport http paperboy <URL>/mcp --header "Authorization: Bearer <token>"` |
-| Claude API (MCP connector) | Yes: `authorization_token` parameter |
-| claude.ai & mobile (any plan) | Check your Add-connector dialog. Anthropic is rolling out a beta "Request headers" section that accepts bearer tokens ([docs](https://claude.com/docs/connectors/custom/remote-mcp)); if your dialog shows it, paste `Authorization: Bearer <token>` there. If it shows only URL + OAuth client fields, you need the OAuth path: FastMCP ships provider integrations (Google, GitHub, Auth0, ...) that slot into `mcp.auth`. On the roadmap |
+| Claude Code | `claude mcp add --transport http paperboy <URL>/mcp --header "Authorization: Bearer <token>"` |
+| Claude API (MCP connector) | `authorization_token` parameter |
+| claude.ai & mobile | Two paths. If your Add-connector dialog has a "Request headers" section (a beta Anthropic is rolling out, [docs](https://claude.com/docs/connectors/custom/remote-mcp)), paste `Authorization: Bearer <token>` there. Otherwise set up Google OAuth (below), then add the connector with just the URL — leave the dialog's OAuth client fields empty; Claude discovers the flow from the server and sends you through a Google sign-in |
 
 Client support changes often. Your own connector dialog is the
 authority, not this table.
+
+## Google OAuth for claude.ai and mobile
+
+The bearer token covers Claude Code and the API, but most claude.ai
+accounts can only authenticate custom connectors through OAuth. Four
+variables in `.env` switch that on; the bearer token keeps working
+alongside it.
+
+1. In the Google Cloud console for your paperboy project, open
+   **APIs & Services > OAuth consent screen**. Choose External, fill
+   in the app name and your email, and add yourself as a test user.
+2. Under **APIs & Services > Credentials**, create an OAuth client ID
+   of type Web application. Add an authorized redirect URI of
+   `<your service URL>/auth/callback` (no `/mcp`), for example
+   `https://paperboy-xxxx.us-central1.run.app/auth/callback`.
+3. Add to `.env`:
+
+   ```bash
+   GOOGLE_OAUTH_CLIENT_ID=<client id>.apps.googleusercontent.com
+   GOOGLE_OAUTH_CLIENT_SECRET=<client secret>
+   SERVER_BASE_URL=https://<your service URL>       # no /mcp suffix
+   OAUTH_ALLOWED_EMAILS=you@gmail.com
+   ```
+
+4. Re-run `./deploy/deploy.sh <project>` to sync and redeploy.
+5. On claude.ai: Settings > Connectors > Add custom connector. Name it,
+   paste `<your service URL>/mcp`, leave the OAuth fields empty, and
+   Add. You'll be sent through Google sign-in once; mobile picks the
+   connector up automatically.
+
+Only accounts on `OAUTH_ALLOWED_EMAILS` can complete sign-in, and
+anyone on that list has full control of the server — sending email
+from your address and editing your Zotero library — so it is normally
+just your own address. While the consent screen is in Testing mode,
+Google expires sign-ins after 7 days (you'll be asked to sign in
+again); publishing the app removes that limit but shows an
+"unverified app" warning during sign-in, which is fine when the only
+user is you.
 
 ## How credentials flow
 
