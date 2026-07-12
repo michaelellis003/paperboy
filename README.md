@@ -121,10 +121,13 @@ deploy your own instance.
 
 ### Deploy your own
 
-One script creates a locked-down, single-tenant Cloud Run service that
-normally costs $0 to run. You need the gcloud CLI and a Google Cloud
-account with billing enabled. A card has to be on file, but paperboy's
-usage stays inside the free tier.
+One script creates a locked-down, single-tenant Cloud Run service. You
+need the gcloud CLI and a Google Cloud account with billing enabled, so
+a card has to be on file. What you pay depends on how much you use it:
+a personal deployment sending papers now and then usually falls inside
+Cloud Run's free tier and costs nothing, but heavy or shared use can go
+past it. The script sets a $1/month budget alert so you hear about it if
+your bill ever starts to climb.
 
 ```bash
 uv run paperboy setup && ./deploy/deploy.sh my-paperboy-project

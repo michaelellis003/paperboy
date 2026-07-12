@@ -200,6 +200,7 @@ and the `setup_status` tool reports what's still missing.
 
 Running locally covers Claude Code and Claude Desktop. To use paperboy
 from claude.ai or the Claude mobile app, deploy it to Google Cloud Run,
-where it runs as your own private instance and normally costs nothing.
-That is covered in [docs/deploy.md](deploy.md), including the one-time
-Google sign-in setup that lets the mobile and web apps connect.
+where it runs as your own private instance and usually costs nothing at
+personal usage. That is covered in [docs/deploy.md](deploy.md),
+including the one-time Google sign-in setup that lets the mobile and web
+apps connect, and a note on what drives the cost.

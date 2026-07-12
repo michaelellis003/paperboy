@@ -4,8 +4,9 @@ Local use needs none of this. Deploy to Cloud Run when you want paperboy
 from claude.ai, your phone, or any machine that isn't running the server.
 
 Every deployment is single-tenant. You run your own instance with your
-own secrets and token, and pay your own bill, which normally stays at
-$0.
+own secrets and token, and pay your own bill. At personal usage that
+bill is usually $0, but it scales with how much you use the service; the
+cost bounds below explain what drives it.
 
 ## Before you start
 
@@ -19,9 +20,10 @@ You need three things:
   credentials.
 - **A Google Cloud account with billing enabled.** Signing up gives you
   a $300 welcome credit over 90 days, and a payment method is required
-  even to stay within the free tier. Cloud Run bills nothing at
-  paperboy's traffic, but Google still wants a card on file. You are
-  not charged unless you manually upgrade to a paid account
+  even to stay within the free tier, so Google wants a card on file. At
+  the low traffic a personal deployment generates, Cloud Run usually
+  costs nothing. You are not charged unless you manually upgrade to a
+  paid account
   ([free tier](https://cloud.google.com/free),
   [billing](https://cloud.google.com/billing/docs/how-to/manage-billing-account)).
 - **Your credentials in `.env`**, from `uv run paperboy setup`.
