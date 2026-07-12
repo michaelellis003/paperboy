@@ -317,8 +317,8 @@ def test_remove_by_refs_refuses_ambiguous_title(fake_api):
         {
             "ref": "same title",
             "candidates": [
-                {"key": "PRE", "id": "arXiv:2401.12345"},
-                {"key": "PUB", "id": "10.1000/pub"},
+                {"key": "PRE", "id": "arXiv:2401.12345", "added": ""},
+                {"key": "PUB", "id": "10.1000/pub", "added": ""},
             ],
         }
     ]
@@ -656,3 +656,41 @@ def test_api_requires_configuration(env, monkeypatch):
     zotero_client._api.cache_clear()
     with pytest.raises(RuntimeError, match="not configured"):
         zotero_client._api()
+
+
+def test_scholarly_ref_for_key(fake_api, env):
+    import paperboy.config
+
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    env.setattr(paperboy.config, "_settings", None)
+    fake_api.queue = [
+        {
+            "key": "S83KSPCA",
+            "data": {"title": "Probe", "archiveID": "arXiv:1109.2378"},
+        },
+        {"key": "DOIONLY9", "data": {"title": "D", "DOI": "10.1/d"}},
+        {"key": "TITLEON1", "data": {"title": "Only A Title Here"}},
+    ]
+    assert zotero_client.scholarly_ref_for_key("S83KSPCA") == "1109.2378"
+    assert zotero_client.scholarly_ref_for_key("DOIONLY9") == "10.1/d"
+    assert (
+        zotero_client.scholarly_ref_for_key("TITLEON1") == "Only A Title Here"
+    )
+    # Non-key-shaped refs and unknown keys fall through to resolution.
+    assert zotero_client.scholarly_ref_for_key("2401.12345") is None
+    assert zotero_client.scholarly_ref_for_key("some paper title") is None
+
+
+def test_scholarly_ref_for_unknown_key_returns_none(fake_api, env, monkeypatch):
+    import paperboy.config
+
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    env.setattr(paperboy.config, "_settings", None)
+
+    def boom(key):
+        raise RuntimeError("404")
+
+    monkeypatch.setattr(fake_api, "item", boom)
+    assert zotero_client.scholarly_ref_for_key("NOTAKEY1") is None

@@ -323,11 +323,16 @@ def _is_queue_collection(collection: str) -> bool:
 
 def _ambiguity_note(ambiguous: list[dict], verb: str) -> str:
     """Render refused-as-ambiguous refs with their consumable ids."""
+
+    def describe(candidate: dict) -> str:
+        detail = candidate["id"]
+        if candidate.get("added"):
+            detail += f", added {candidate['added']}"
+        return f"item key {candidate['key']} ({detail})"
+
     parts = [
         f"{entry['ref']!r} matches {len(entry['candidates'])} items: "
-        + ", ".join(
-            f"item key {c['key']} ({c['id']})" for c in entry["candidates"]
-        )
+        + ", ".join(describe(c) for c in entry["candidates"])
         for entry in ambiguous
     ]
     return (
@@ -363,6 +368,13 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
     seen: set[str] = set()
     problems: list[str] = []
     for ref in refs:
+        # A Zotero item key (as advertised by list_queue and ambiguity
+        # receipts) names a library item, not a scholarly record —
+        # translate it to the item's own id before resolving.
+        if settings().zotero_enabled:
+            from_key = zotero_client.scholarly_ref_for_key(ref)
+            if from_key:
+                ref = from_key
         try:
             paper = resolver.resolve(ref)
         except ValueError as exc:
@@ -383,7 +395,7 @@ def _resolve_all(refs: list[str]) -> tuple[list[Paper], list[str]]:
             elif status == 429:
                 problems.append(
                     f"backend rate-limited while resolving: {ref} — the "
-                    "ref may be fine; wait a minute and retry"
+                    "ref may be fine; retry after the rate limit lifts"
                 )
             else:
                 problems.append(
@@ -823,7 +835,7 @@ def list_queue() -> list[dict]:
     unsent item), or to find refs for remove_from_queue. Each entry
     also carries ``key``, the Zotero item key — the one id that stays
     unique when the queue holds duplicate entries of the same paper;
-    every ref-taking tool accepts it.
+    every ref-taking tool accepts it. ``added`` dates are UTC.
     """
     return zotero_client.list_queue()
 

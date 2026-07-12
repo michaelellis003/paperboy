@@ -856,6 +856,28 @@ def test_queue_papers_drops_reading_queue_from_collections(
     assert "dropped the Reading Queue from collections" in receipt
 
 
+def test_resolve_all_translates_item_keys(
+    zotero_env, monkeypatch, paper_factory
+):
+    # A Zotero item key from list_queue must work in send/queue too:
+    # it is swapped for the item's own scholarly id before resolution.
+    monkeypatch.setattr(
+        zotero_client,
+        "scholarly_ref_for_key",
+        lambda ref: "2401.12345" if ref == "S83KSPCA" else None,
+    )
+    seen = {}
+
+    def fake_resolve(ref):
+        seen["ref"] = ref
+        return paper_factory()
+
+    monkeypatch.setattr(resolver, "resolve", fake_resolve)
+    resolved, problems = server._resolve_all(["S83KSPCA"])
+    assert seen["ref"] == "2401.12345"
+    assert len(resolved) == 1 and problems == []
+
+
 def test_resolve_all_reports_429_as_transient(env, monkeypatch):
     request = httpx.Request("GET", "https://api.openalex.org/works")
 
@@ -870,7 +892,7 @@ def test_resolve_all_reports_429_as_transient(env, monkeypatch):
     resolved, problems = server._resolve_all(["Mastering the game of Go"])
     assert resolved == []
     assert "rate-limited" in problems[0]
-    assert "wait a minute and retry" in problems[0]
+    assert "retry after the rate limit lifts" in problems[0]
     assert "could not resolve" not in problems[0]
 
 
@@ -1031,8 +1053,8 @@ def test_file_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
                 {
                     "ref": "dup title",
                     "candidates": [
-                        {"key": "KEY1", "id": "arXiv:1"},
-                        {"key": "KEY2", "id": "arXiv:1"},
+                        {"key": "KEY1", "id": "arXiv:1", "added": ""},
+                        {"key": "KEY2", "id": "arXiv:1", "added": ""},
                     ],
                 }
             ],
@@ -1054,8 +1076,8 @@ def test_unfile_papers_reports_ambiguity(env, zotero_ok, monkeypatch):
                 {
                     "ref": "dup title",
                     "candidates": [
-                        {"key": "KEY1", "id": "no other id"},
-                        {"key": "KEY2", "id": "no other id"},
+                        {"key": "KEY1", "id": "no other id", "added": ""},
+                        {"key": "KEY2", "id": "no other id", "added": ""},
                     ],
                 }
             ],
@@ -1154,8 +1176,16 @@ def test_remove_from_queue_reports_ambiguity(env, monkeypatch):
                 {
                     "ref": "same title",
                     "candidates": [
-                        {"key": "PRE", "id": "arXiv:2401.12345"},
-                        {"key": "PUB", "id": "10.1000/pub"},
+                        {
+                            "key": "PRE",
+                            "id": "arXiv:2401.12345",
+                            "added": "2026-07-01",
+                        },
+                        {
+                            "key": "PUB",
+                            "id": "10.1000/pub",
+                            "added": "2026-07-10",
+                        },
                     ],
                 }
             ],
@@ -1164,7 +1194,7 @@ def test_remove_from_queue_reports_ambiguity(env, monkeypatch):
     receipt = server.remove_from_queue(["same title"])
     assert "Removed 0 item(s)" in receipt
     assert "NOT removed (ambiguous" in receipt
-    assert "item key PRE (arXiv:2401.12345)" in receipt
+    assert "item key PRE (arXiv:2401.12345, added 2026-07-01)" in receipt
     assert "re-run with that item key" in receipt
 
 

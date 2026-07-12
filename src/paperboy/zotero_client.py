@@ -6,6 +6,7 @@ and delivery state is recorded as tags on the item — ``sent-to-ereader``
 could be found (so send_queue stops retrying it every run).
 """
 
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -216,6 +217,34 @@ def add_paper(
     return result["successful"]["0"]["key"], "created"
 
 
+_ITEM_KEY = re.compile(r"^[A-Z0-9]{8}$")
+
+
+def scholarly_ref_for_key(ref: str) -> str | None:
+    """Translate a Zotero item key into the item's best scholarly ref.
+
+    send_papers/queue_papers resolve refs against the scholarly
+    backends, which know nothing about Zotero keys — this bridge keeps
+    the promise that a key from list_queue works in every ref-taking
+    tool. Returns None when the ref isn't key-shaped, Zotero is off,
+    or no such item exists (so ordinary resolution proceeds).
+    """
+    candidate = ref.strip()
+    if not _ITEM_KEY.fullmatch(candidate):
+        return None
+    if not settings().zotero_enabled:
+        return None
+    try:
+        item = _api().item(candidate)
+    except Exception:
+        return None  # fall through to ordinary resolution
+    data = item.get("data", {})
+    archive = data.get("archiveID", "")
+    if archive.startswith("arXiv:"):
+        return archive.removeprefix("arXiv:")
+    return data.get("DOI") or data.get("title") or None
+
+
 def _matching_items(ref: str, items: list[dict]) -> list[dict]:
     """All items a ref matches: exact ids/titles, or the Zotero item key.
 
@@ -243,7 +272,14 @@ def _ambiguity(ref: str, matches: list[dict]) -> dict:
     return {
         "ref": ref,
         "candidates": [
-            {"key": m["key"], "id": _unique_ref(m["data"])} for m in matches
+            {
+                "key": m["key"],
+                "id": _unique_ref(m["data"]),
+                # Exact duplicates share every id; the added date is
+                # often the only human-tellable difference.
+                "added": m["data"].get("dateAdded", "")[:10],
+            }
+            for m in matches
         ],
     }
 
