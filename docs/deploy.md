@@ -46,8 +46,7 @@ shared across your billing account; scale-to-zero means an idle service
 costs nothing ([Cloud Run pricing](https://cloud.google.com/run/pricing)).
 Re-running the script is a clean sync; rotated secrets are picked up
 and nothing is duplicated. A cleanup policy keeps only the two newest
-container images so Artifact Registry storage stays inside the free
-tier.
+container images, so old builds don't pile up in Artifact Registry.
 
 Two details you may notice when auditing your own project. First,
 `gcloud run services describe` can show a service-level "Max: 20";

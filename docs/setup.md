@@ -68,10 +68,10 @@ looks like `yourname_a1b2c3@kindle.com`. That is where paperboy sends.
 
 On the same Personal Document Settings screen there is an **Approved
 Personal Document E-mail List**. Amazon drops any document from an
-address that is not on this list, silently, so this step is the one
-people most often miss. Select **Add a new approved e-mail address**,
-enter the exact address paperboy will send from (the `FROM_EMAIL` you
-give the wizard), and save.
+address that is not on this list, silently, so it's easy to miss.
+Select **Add a new approved e-mail address**, enter the exact address
+paperboy will send from (the `FROM_EMAIL` you give the wizard), and
+save.
 
 Amazon accepts up to 25 attachments and 50 MB per email; paperboy splits
 larger batches to stay under that. Reference:

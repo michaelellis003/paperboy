@@ -26,9 +26,10 @@ deliver them. What that looks like in practice:
 
 - Papers you queue land in a **Reading Queue** collection in Zotero,
   created on demand.
-- Once a paper reaches your device, paperboy tags it `sent-to-ereader`,
-  so the same paper never goes to your e-reader twice, even in a
-  different conversation weeks later.
+- Once a paper reaches your device, paperboy tags it `sent-to-ereader`
+  in Zotero, so it skips papers already sent to your e-reader, even in
+  a later conversation. (Without Zotero there's no memory between
+  sends, so this protection needs it.)
 - Claude can file papers into your topical collections too. It proposes
   one from the paper's topic and your existing collection names, and
   asks you when the fit is unclear. A paper can sit in several
@@ -137,12 +138,12 @@ How a client connects to the deployed server depends on the client:
 
 - **Claude Code and the API** use a bearer token the script generates.
   You paste it into an `Authorization` header, as in the section above.
-- **claude.ai and the Claude mobile app** can't send a bearer token, so
-  they sign in with Google instead. That needs a one-time Google OAuth
-  client, which you create in your own Cloud project (a Web-application
-  client with one redirect URI). Sign-in is restricted to your own
-  email address, and because paperboy only asks Google for your email,
-  the sign-in doesn't expire.
+- **claude.ai and the Claude mobile app** usually can't send a bearer
+  token from their connector dialog, so they sign in with Google
+  instead. That needs a one-time Google OAuth client, which you create
+  in your own Cloud project (a Web-application client with one redirect
+  URI). Sign-in is restricted to your own email address, and because
+  paperboy only asks Google for your email, the sign-in doesn't expire.
 
 [docs/deploy.md](docs/deploy.md) has the full procedure for both,
 including the OAuth console steps, the security model, and cost bounds.
