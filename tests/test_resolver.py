@@ -1,7 +1,17 @@
 import httpx
 import pytest
 
-from paperboy import arxiv, doi, openalex, resolver
+from paperboy import arxiv, doi, openalex, resolver, s2
+
+
+@pytest.fixture(autouse=True)
+def _no_network_s2(monkeypatch):
+    """Default the Semantic Scholar title arm to empty.
+
+    Tests that exercise the S2 fallback override this explicitly; the
+    rest must never make a real network call when a title reaches it.
+    """
+    monkeypatch.setattr(s2, "search_title", lambda q, limit=5: [])
 
 
 def test_doi_refs_go_to_crossref(monkeypatch, paper_factory):
@@ -342,3 +352,104 @@ def test_download_any_transient_failure_wins_classification(
     with pytest.raises(httpx.HTTPStatusError) as excinfo:
         resolver.download_pdf(paper)
     assert excinfo.value.response.status_code == 503
+
+
+# --- honest URL classification -----------------------------------------
+
+
+def test_direct_pdf_url_suggests_attach_pdf(monkeypatch):
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="direct PDF link"):
+        resolver.resolve("https://stat.cmu.edu/~cshalizi/ADAfaEPoV/ADA.pdf")
+
+
+def test_github_url_is_a_file_share(monkeypatch):
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="file-share or code-host"):
+        resolver.resolve("https://github.com/user/repo/blob/main/primer.pdf")
+
+
+def test_google_drive_url_is_a_file_share(monkeypatch):
+    with pytest.raises(ValueError, match="file-share or code-host"):
+        resolver.resolve("https://drive.google.com/file/d/abc123/view")
+
+
+def test_amazon_url_suggests_add_book(monkeypatch):
+    with pytest.raises(ValueError, match="add_book"):
+        resolver.resolve("https://www.amazon.com/dp/1470421992")
+
+
+# --- Semantic Scholar title fallback -----------------------------------
+
+
+def test_title_falls_back_to_semantic_scholar(monkeypatch, paper_factory):
+    wanted = paper_factory(
+        title="A Textbook OpenAlex Ranks Poorly",
+        arxiv_id=None,
+        doi="10.1/textbook",
+    )
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    monkeypatch.setattr(s2, "search_title", lambda q, limit=5: [wanted])
+    assert resolver.resolve("A Textbook OpenAlex Ranks Poorly") is wanted
+
+
+# --- "did you mean" for plausible-but-not-confident titles --------------
+
+
+def test_plausible_title_offers_candidate_with_id(monkeypatch, paper_factory):
+    # Ratio ~0.77: below auto-accept, above the offer floor.
+    candidate = paper_factory(
+        title="Attention Is Not All You Really Need Now",
+        arxiv_id=None,
+        doi="10.1/candidate",
+    )
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [candidate])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(resolver.AmbiguousTitleError) as excinfo:
+        resolver.resolve("Attention Is All You Need")
+    message = str(excinfo.value)
+    assert "Did you mean" in message
+    assert "10.1/candidate" in message
+    # It subclasses ValueError so every existing caller degrades safely.
+    assert isinstance(excinfo.value, ValueError)
+
+
+def test_plausible_title_without_id_does_not_offer(monkeypatch, paper_factory):
+    # Same mid-band match, but the candidate has no concrete id to re-run
+    # with — offering it would loop forever, so it hard-fails instead.
+    candidate = paper_factory(
+        title="Attention Is Not All You Really Need Now",
+        arxiv_id=None,
+        doi=None,
+    )
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [candidate])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="confidently-matching title") as info:
+        resolver.resolve("Attention Is All You Need")
+    assert not isinstance(info.value, resolver.AmbiguousTitleError)
+
+
+def test_transient_error_wins_over_offer(monkeypatch, paper_factory):
+    # A 429 on one arm plus a mid-band candidate on another must raise the
+    # transient error, not offer a possibly-inferior match.
+    candidate = paper_factory(
+        title="Attention Is Not All You Really Need Now",
+        arxiv_id=None,
+        doi="10.1/candidate",
+    )
+    request = httpx.Request("GET", "https://api.openalex.org/works")
+
+    def throttled(q, max_results):
+        raise httpx.HTTPStatusError(
+            "429",
+            request=request,
+            response=httpx.Response(429, request=request),
+        )
+
+    monkeypatch.setattr(openalex, "search", throttled)
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [candidate])
+    with pytest.raises(httpx.HTTPStatusError):
+        resolver.resolve("Attention Is All You Need")

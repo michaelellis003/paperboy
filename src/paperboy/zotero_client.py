@@ -13,6 +13,7 @@ from typing import Any
 from pyzotero import zotero, zotero_errors
 
 from . import arxiv, doi
+from .books import Book, normalize_isbn
 from .config import settings
 from .models import Paper, normalize_title
 
@@ -106,6 +107,12 @@ def _tags(item: dict) -> set[str]:
     return {t["tag"] for t in item["data"].get("tags", [])}
 
 
+# The item types this pipeline creates for papers, and the only types a
+# fuzzy title match may bridge to. Exact id matches (arXiv/DOI) are
+# identity-safe across any type; a normalized-title match is not.
+_PAPER_ITEM_TYPES = ("preprint", "journalArticle")
+
+
 def _matches(paper: Paper, data: dict[str, Any]) -> bool:
     """Whether an existing Zotero item is the same paper."""
     if paper.arxiv_id and (
@@ -117,7 +124,15 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
     if paper.doi and doi and paper.doi.lower() == doi.lower():
         return True
     # DOI- and arXiv-resolved forms of the same paper can share no id
-    # fields at all; the (normalized) title is the fallback bridge.
+    # fields at all; the normalized title is the fallback bridge. But it
+    # is fuzzy — titles collide across works and item types — so it must
+    # stay WITHIN paper records. Bridging to a book, or to a report /
+    # thesis / manuscript that attach_pdf can create, would merge two
+    # distinct works and clobber the grey-lit item's delivery-state.
+    # (Real Zotero always sets itemType; a missing one is a test fixture.)
+    item_type = data.get("itemType", "")
+    if item_type and item_type not in _PAPER_ITEM_TYPES:
+        return False
     title = data.get("title", "")
     return bool(
         title and normalize_title(paper.title) == normalize_title(title)
@@ -163,6 +178,111 @@ def file_item(item: dict, collections: list[str] | None) -> None:
             _add_to_collection(item, key)
 
 
+def _creator_type(template: dict) -> str:
+    """The default creator type for an item type ('author' as fallback).
+
+    Read from the type's own template so an unusual item_type that wants
+    'presenter' or 'editor' doesn't produce items Zotero rejects.
+    """
+    creators = template.get("creators") or [{}]
+    return creators[0].get("creatorType") or "author"
+
+
+def _base_template(
+    item_type: str,
+    *,
+    title: str,
+    authors: list[str],
+    abstract: str = "",
+    date: str = "",
+    url: str = "",
+    doi: str | None = None,
+    collection_keys: list[str] | None = None,
+) -> dict:
+    """A Zotero item template of ``item_type`` with the common fields set.
+
+    Shared by the paper, book, and attach-PDF item builders. ``DOI`` is
+    only written when the type actually has that field — ``book`` and
+    kin have none, and an invalid key makes create_items fail.
+    """
+    template = _api().item_template(item_type)
+    template["title"] = title
+    template["creators"] = [
+        {"creatorType": _creator_type(template), "name": name}
+        for name in authors
+    ]
+    template["abstractNote"] = abstract
+    template["date"] = date
+    template["url"] = url
+    if doi and "DOI" in template:
+        template["DOI"] = doi
+    template["collections"] = list(collection_keys or [])
+    return template
+
+
+def _paper_template(paper: Paper, collection_keys: list[str]) -> dict:
+    item_type = "preprint" if paper.arxiv_id else "journalArticle"
+    template = _base_template(
+        item_type,
+        title=paper.title,
+        authors=paper.authors,
+        abstract=paper.abstract,
+        date=paper.published,
+        url=paper.url,
+        doi=paper.doi,
+        collection_keys=collection_keys,
+    )
+    if paper.arxiv_id:
+        template["repository"] = "arXiv"
+        template["archiveID"] = f"arXiv:{paper.arxiv_id}"
+    return template
+
+
+def _upsert_paper(
+    paper: Paper, collections: list[str] | None, queue: bool
+) -> tuple[str, str, list[str]]:
+    """Create-or-find a paper item and file it; optionally into the queue.
+
+    Returns (item key, status, collection names). With ``queue`` the
+    status is created/requeued/already_queued; without it (catalog-only)
+    created/existing. The collection names are the item's membership
+    after filing, so a duplicate receipt can say where the paper lives.
+    """
+    api = _api()
+    extra_keys = [
+        collection_key(name, create=True) for name in collections or []
+    ]
+    queue_key = _queue_collection_key() if queue else None
+
+    existing = find_item(paper)
+    if existing:
+        was_queued = bool(
+            queue_key and queue_key in existing["data"].get("collections", [])
+        )
+        for key in ([queue_key] if queue_key else []) + extra_keys:
+            if key:
+                _add_to_collection(existing, key)
+        names = item_collection_names(existing)
+        if not queue:
+            return existing["key"], "existing", names
+        # Distinguish a true no-op (already queued) from an item pulled
+        # back into the queue, so the receipt is honest.
+        status = "already_queued" if was_queued else "requeued"
+        return existing["key"], status, names
+
+    base_keys = ([queue_key] if queue_key else []) + [
+        k for k in extra_keys if k
+    ]
+    result = api.create_items([_paper_template(paper, base_keys)])
+    if result["failed"]:
+        raise RuntimeError(f"Zotero rejected item: {result['failed']}")
+    return (
+        result["successful"]["0"]["key"],
+        "created",
+        _names_for_keys(base_keys),
+    )
+
+
 def add_paper(
     paper: Paper, collections: list[str] | None = None
 ) -> tuple[str, str]:
@@ -179,46 +299,170 @@ def add_paper(
       collection) but was not in the queue, and was re-added to it;
     - "already_queued": the paper was already in the queue (no change).
     """
+    key, status, _ = _upsert_paper(paper, collections, queue=True)
+    return key, status
+
+
+def catalog_paper(
+    paper: Paper, collections: list[str] | None = None
+) -> tuple[str, str, list[str]]:
+    """Add a paper to the library WITHOUT queueing it for delivery.
+
+    The "just track it" path: create-or-dedup the item and file it into
+    ``collections``, never touching the Reading Queue and never tagging
+    no-oa-pdf. A paper with no open-access PDF is a perfectly good
+    library record here, not a delivery failure. Returns (item key,
+    status, collection names) where status is "created" or "existing".
+    """
+    return _upsert_paper(paper, collections, queue=False)
+
+
+def _book_isbn(data: dict[str, Any]) -> str | None:
+    raw = data.get("ISBN", "")
+    return normalize_isbn(raw) if raw else None
+
+
+def _matches_book(book: Book, data: dict[str, Any]) -> bool:
+    """Whether an existing item is the same book.
+
+    ISBN-first: when either side carries an ISBN, only equal ISBNs
+    match. Title matching is a fallback used only when NEITHER side has
+    an ISBN — distinct editions legitimately share a title and are
+    separate works worth keeping apart.
+    """
+    if data.get("itemType") != "book":
+        return False
+    stored_isbn = _book_isbn(data)
+    if book.isbn or stored_isbn:
+        return bool(book.isbn and stored_isbn and book.isbn == stored_isbn)
+    title = data.get("title", "")
+    return bool(title and normalize_title(book.title) == normalize_title(title))
+
+
+def find_book(book: Book) -> dict | None:
+    """Return the library book matching this one, if any (no queue scan)."""
     api = _api()
-    queue_key = _queue_collection_key()
+    for query in (book.isbn, book.title):
+        if not query:
+            continue
+        for item in api.items(q=query, qmode="everything", limit=25):
+            if _matches_book(book, item.get("data", {})):
+                return item
+    return None
+
+
+def _book_template(book: Book, collection_keys: list[str]) -> dict:
+    template = _base_template(
+        "book",
+        title=book.title,
+        authors=book.authors,
+        abstract=book.abstract,
+        date=book.year,
+        url=book.url,
+        collection_keys=collection_keys,
+    )
+    for field, value in (
+        ("publisher", book.publisher),
+        ("edition", book.edition),
+        ("series", book.series),
+        ("numPages", book.num_pages),
+        ("place", book.place),
+        ("ISBN", book.isbn),
+    ):
+        if value:
+            template[field] = value
+    # ``book`` has no DOI field; Zotero's convention keeps it in Extra.
+    if book.doi:
+        template["extra"] = f"DOI: {book.doi}"
+    return template
+
+
+def add_book(
+    book: Book, collections: list[str] | None = None
+) -> tuple[str, str, list[str]]:
+    """Catalog a book as a Zotero ``book`` item, deduplicating by ISBN.
+
+    Never queues and never delivers — books are cataloged, not sent (an
+    open-access textbook PDF goes through attach_pdf). Returns (item
+    key, status, collection names) where status is "created" or
+    "existing".
+    """
+    api = _api()
     extra_keys = [
         collection_key(name, create=True) for name in collections or []
     ]
-
-    existing = find_item(paper)
+    kept_keys = [k for k in extra_keys if k]
+    existing = find_book(book)
     if existing:
-        # An item previously removed from the queue (but kept in the
-        # library via topical collections) rejoins the queue instead of
-        # spawning a duplicate record. Distinguish a true no-op (already
-        # in the queue) from a genuine re-add so the receipt is honest.
-        was_queued = queue_key in existing["data"].get("collections", [])
-        _add_to_collection(existing, queue_key)
-        for key in extra_keys:
-            if key:
-                _add_to_collection(existing, key)
-        return existing["key"], ("already_queued" if was_queued else "requeued")
+        for key in kept_keys:
+            _add_to_collection(existing, key)
+        return existing["key"], "existing", item_collection_names(existing)
+    result = api.create_items([_book_template(book, kept_keys)])
+    if result["failed"]:
+        raise RuntimeError(f"Zotero rejected book: {result['failed']}")
+    return (
+        result["successful"]["0"]["key"],
+        "created",
+        _names_for_keys(kept_keys),
+    )
 
-    if paper.arxiv_id:
-        template = api.item_template("preprint")
-        template["repository"] = "arXiv"
-        template["archiveID"] = f"arXiv:{paper.arxiv_id}"
-    else:
-        template = api.item_template("journalArticle")
-    template["title"] = paper.title
-    template["creators"] = [
-        {"creatorType": "author", "name": name} for name in paper.authors
+
+def _attach_file(parent_key: str, pdf_path: str) -> bool:
+    """Upload a local PDF as a child attachment; True when it stuck."""
+    result = _api().attachment_simple([pdf_path], parentid=parent_key)
+    if isinstance(result, dict):
+        return not result.get("failure")
+    return bool(result)
+
+
+def attach_pdf_item(
+    *,
+    item_type: str,
+    title: str,
+    authors: list[str],
+    pdf_path: str,
+    year: str = "",
+    url: str = "",
+    doi: str | None = None,
+    abstract: str = "",
+    collections: list[str] | None = None,
+) -> tuple[str, bool]:
+    """Create an item of ``item_type`` and attach a local PDF to it.
+
+    The grey-literature path: caller-supplied metadata, no registry
+    lookup, no queue. Returns (item key, whether the PDF attached).
+    """
+    api = _api()
+    extra_keys = [
+        collection_key(name, create=True) for name in collections or []
     ]
-    template["abstractNote"] = paper.abstract
-    template["date"] = paper.published
-    template["url"] = paper.url
-    if paper.doi:
-        template["DOI"] = paper.doi
-    template["collections"] = [queue_key, *[k for k in extra_keys if k]]
-
+    template = _base_template(
+        item_type,
+        title=title,
+        authors=authors,
+        abstract=abstract,
+        date=year,
+        url=url,
+        doi=doi,
+        collection_keys=[k for k in extra_keys if k],
+    )
     result = api.create_items([template])
     if result["failed"]:
         raise RuntimeError(f"Zotero rejected item: {result['failed']}")
-    return result["successful"]["0"]["key"], "created"
+    key = result["successful"]["0"]["key"]
+    return key, _attach_file(key, pdf_path)
+
+
+def _names_for_keys(keys: list[str]) -> list[str]:
+    if not keys:
+        return []
+    names = {c["key"]: c["data"]["name"] for c in _collections_raw()}
+    return [names[key] for key in keys if key in names]
+
+
+def item_collection_names(item: dict) -> list[str]:
+    """Names of the collections an item currently belongs to."""
+    return _names_for_keys(item["data"].get("collections", []))
 
 
 _ITEM_KEY = re.compile(r"^[A-Z0-9]{8}$")
