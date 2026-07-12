@@ -252,14 +252,59 @@ def test_remove_by_refs(fake_api):
             },
         },
     ]
-    removed, misses = zotero_client.remove_by_refs(
+    removed, misses, ambiguous = zotero_client.remove_by_refs(
         ["10.1000/alpha", "beta", "nonexistent"]
     )
+    assert ambiguous == []
     assert [entry["title"] for entry in removed] == ["Alpha", "Beta"]
     assert misses == ["nonexistent"]
     # Moved to Zotero's Trash (restorable), never permanently deleted.
     assert fake_api.trashed == ["A", "B"]
     assert fake_api.deleted == []
+
+
+def test_remove_by_refs_refuses_ambiguous_title(fake_api):
+    # A preprint and its published version share a title: removal must
+    # stop and report both, never guess.
+    fake_api.queue = [
+        {
+            "key": "PRE",
+            "data": {"title": "Same Title", "archiveID": "arXiv:2401.12345"},
+        },
+        {
+            "key": "PUB",
+            "data": {"title": "Same Title", "DOI": "10.1000/pub"},
+        },
+    ]
+    removed, misses, ambiguous = zotero_client.remove_by_refs(["same title"])
+    assert removed == []
+    assert misses == []
+    assert ambiguous == [
+        {
+            "ref": "same title",
+            "candidates": ["arXiv:2401.12345", "10.1000/pub"],
+        }
+    ]
+    # Nothing was touched.
+    assert getattr(fake_api, "trashed", []) == []
+    assert getattr(fake_api, "uncollected", []) == []
+
+
+def test_remove_by_refs_specific_id_beats_duplicate_titles(fake_api):
+    fake_api.queue = [
+        {
+            "key": "PRE",
+            "data": {"title": "Same Title", "archiveID": "arXiv:2401.12345"},
+        },
+        {
+            "key": "PUB",
+            "data": {"title": "Same Title", "DOI": "10.1000/pub"},
+        },
+    ]
+    removed, _, ambiguous = zotero_client.remove_by_refs(["10.1000/pub"])
+    assert [e["title"] for e in removed] == ["Same Title"]
+    assert ambiguous == []
+    assert fake_api.trashed == ["PUB"]
 
 
 def test_remove_by_refs_reports_sent_state(env, fake_api):
@@ -273,7 +318,7 @@ def test_remove_by_refs_reports_sent_state(env, fake_api):
             },
         }
     ]
-    removed, _ = zotero_client.remove_by_refs(["10.1000/read"])
+    removed, _, _ = zotero_client.remove_by_refs(["10.1000/read"])
     assert removed == [
         {
             "title": "Already Read",
@@ -295,7 +340,7 @@ def test_remove_keeps_items_filed_elsewhere(env, fake_api):
             },
         }
     ]
-    removed, _ = zotero_client.remove_by_refs(["10.1000/filed"])
+    removed, _, _ = zotero_client.remove_by_refs(["10.1000/filed"])
     assert removed == [
         {"title": "Filed Paper", "was_sent": True, "kept_in_library": True}
     ]
@@ -390,7 +435,7 @@ def test_remove_by_refs_rejects_empty_and_partial(fake_api):
         {"key": "A", "data": {"title": "Alpha", "DOI": "10.1000/alpha"}},
         {"key": "B", "data": {"title": "Beta", "DOI": "10.1000/beta"}},
     ]
-    removed, misses = zotero_client.remove_by_refs(["", "  ", "10.1000"])
+    removed, misses, _ = zotero_client.remove_by_refs(["", "  ", "10.1000"])
     assert removed == []
     assert misses == ["", "  ", "10.1000"]
     assert fake_api.deleted == []
@@ -407,7 +452,7 @@ def test_remove_by_refs_matches_archive_id(fake_api):
             },
         }
     ]
-    removed, misses = zotero_client.remove_by_refs(["arXiv:2401.12345"])
+    removed, misses, _ = zotero_client.remove_by_refs(["arXiv:2401.12345"])
     assert [entry["title"] for entry in removed] == ["Alpha"]
     assert misses == []
 

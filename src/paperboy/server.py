@@ -701,8 +701,12 @@ def remove_from_queue(refs: list[str]) -> str:
     protection — sending those again later will deliver them again.
     Nothing is ever deleted from the e-reader, and nothing is ever
     permanently deleted from Zotero.
+
+    A ref that matches more than one queue item (duplicate titles)
+    removes nothing; the receipt lists each candidate's specific id so
+    the user can choose. Relay that choice — never pick for them.
     """
-    removed, misses = zotero_client.remove_by_refs(refs)
+    removed, misses, ambiguous = zotero_client.remove_by_refs(refs)
     receipt = f"Removed {len(removed)} item(s) from the queue"
     if removed:
         receipt += ": " + "; ".join(entry["title"] for entry in removed)
@@ -725,6 +729,16 @@ def remove_from_queue(refs: list[str]) -> str:
         )
     if misses:
         receipt += f" | Not found in queue: {'; '.join(misses)}"
+    if ambiguous:
+        parts = [
+            f"{entry['ref']!r} matches {len(entry['candidates'])} items "
+            f"({', '.join(entry['candidates'])})"
+            for entry in ambiguous
+        ]
+        receipt += (
+            " | NOT removed (ambiguous — ask the user which, then "
+            f"re-run with that id): {'; '.join(parts)}"
+        )
     return receipt
 
 

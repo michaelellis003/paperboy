@@ -762,6 +762,7 @@ def test_remove_reports_kept_in_library(env, monkeypatch):
                 }
             ],
             [],
+            [],
         ),
     )
     receipt = server.remove_from_queue(["10.1/a"])
@@ -882,6 +883,7 @@ def test_remove_from_queue_tool(env, monkeypatch):
                 }
             ],
             ["nope"],
+            [],
         ),
     )
     receipt = server.remove_from_queue(["10.1/a", "nope"])
@@ -903,11 +905,33 @@ def test_remove_from_queue_warns_on_sent_items(env, monkeypatch):
                 }
             ],
             [],
+            [],
         ),
     )
     receipt = server.remove_from_queue(["10.1/a"])
     assert "Zotero's Trash" in receipt
     assert "WILL re-deliver: Read One" in receipt
+
+
+def test_remove_from_queue_reports_ambiguity(env, monkeypatch):
+    monkeypatch.setattr(
+        zotero_client,
+        "remove_by_refs",
+        lambda refs: (
+            [],
+            [],
+            [
+                {
+                    "ref": "same title",
+                    "candidates": ["arXiv:2401.12345", "10.1000/pub"],
+                }
+            ],
+        ),
+    )
+    receipt = server.remove_from_queue(["same title"])
+    assert "Removed 0 item(s)" in receipt
+    assert "NOT removed (ambiguous" in receipt
+    assert "arXiv:2401.12345, 10.1000/pub" in receipt
 
 
 def test_setup_status_flags_invalid_delivery_method(env):

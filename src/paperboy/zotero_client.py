@@ -374,27 +374,50 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
     ).endswith(f"/abs/{arxiv_id}")
 
 
-def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
+def _unique_ref(data: dict[str, Any]) -> str:
+    """The most specific ref for an item, for disambiguation hints."""
+    archive = data.get("archiveID", "")
+    if archive.startswith("arXiv:"):
+        return archive
+    return data.get("DOI") or data.get("url") or data.get("key", "?")
+
+
+def remove_by_refs(
+    refs: list[str],
+) -> tuple[list[dict], list[str], list[dict]]:
     """Remove queue items matching each ref (id, DOI, URL, or title).
 
     Items also filed elsewhere just leave the queue; items that live
     nowhere else are moved to Zotero's Trash (restorable in the app).
     Matching is exact (normalized ids/DOIs, case-insensitive titles);
-    partial or empty refs never match. Returns (removed entries with
-    ``title`` and ``was_sent``, refs that matched nothing).
+    partial or empty refs never match. A ref matching MORE than one
+    item (two queue entries sharing a title) removes nothing — this is
+    the one place a wrong match loses state, so ambiguity stops the
+    removal instead of guessing. Returns (removed entries with
+    ``title`` and ``was_sent``, refs that matched nothing, ambiguous
+    refs with their candidates' specific ids).
     """
     api = _api()
     queue_key = _queue_collection_key()
     items = _queue_items()
-    removed, misses = [], []
+    removed, misses, ambiguous = [], [], []
     for ref in refs:
-        match = next(
-            (item for item in items if _ref_matches(ref, item["data"])),
-            None,
-        )
-        if match is None:
+        matches = [item for item in items if _ref_matches(ref, item["data"])]
+        if not matches:
             misses.append(ref)
             continue
+        if len(matches) > 1:
+            ambiguous.append(
+                {
+                    "ref": ref,
+                    "candidates": [
+                        _unique_ref({**m["data"], "key": m["key"]})
+                        for m in matches
+                    ],
+                }
+            )
+            continue
+        match = matches[0]
         # An item the user filed into topical collections is theirs to
         # keep: only drop its queue membership. Items that live nowhere
         # else go to Zotero's Trash — same as Delete in the Zotero app,
@@ -417,7 +440,7 @@ def remove_by_refs(refs: list[str]) -> tuple[list[dict], list[str]]:
                 "kept_in_library": bool(other),
             }
         )
-    return removed, misses
+    return removed, misses, ambiguous
 
 
 def _add_tag(item_key: str, tag: str) -> None:
