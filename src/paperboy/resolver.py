@@ -140,17 +140,25 @@ def download_pdf(paper: Paper) -> bytes:
     )
 
 
+# A real paper PDF is well over this; a HEAD reporting less than this
+# is measuring a redirect or landing stub, not the document, so we treat
+# it as unknown rather than reporting a misleading "0.0 MB".
+_MIN_PLAUSIBLE_PDF_BYTES = 50_000
+
+
 def probe_pdf_size(paper: Paper) -> int | None:
     """Best-effort PDF size in bytes via a HEAD request.
 
-    Returns None when the server does not say.
+    Returns None when the server does not report a plausible size.
     """
     for url in _candidate_pdf_urls(paper):
         try:
             response = client.head(url)
             length = response.headers.get("content-length")
             if response.status_code == 200 and length:
-                return int(length)
+                size = int(length)
+                if size >= _MIN_PLAUSIBLE_PDF_BYTES:
+                    return size
         except httpx.HTTPError:
             continue
     return None

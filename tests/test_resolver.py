@@ -245,3 +245,20 @@ def test_probe_pdf_size_unknown(monkeypatch, paper_factory):
         ),
     )
     assert resolver.probe_pdf_size(paper_factory()) is None
+
+
+def test_probe_pdf_size_ignores_implausibly_small(monkeypatch, paper_factory):
+    # A HEAD reporting a few KB is a redirect/landing stub, not the PDF;
+    # treat it as unknown rather than reporting a misleading "0.0 MB".
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200, headers={"content-length": "8000"}
+                )
+            )
+        ),
+    )
+    assert resolver.probe_pdf_size(paper_factory()) is None
