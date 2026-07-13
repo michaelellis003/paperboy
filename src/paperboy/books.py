@@ -25,16 +25,32 @@ _GOOGLE_BOOKS = "https://www.googleapis.com/books/v1/volumes"
 
 _TITLE_MATCH_THRESHOLD = 0.8
 _ISBN_CHARS = re.compile(r"[^0-9Xx]")
+# "ISBN-13: 978-..." is the exact labeled format on retail/publisher
+# pages. The digits in "-13"/"-10" would survive character cleaning and
+# corrupt the number, so the label is stripped as a unit first. The
+# lookahead keeps the 10/13 only when a separator follows — "ISBN 10:"
+# is a label, but in "ISBN-1306406152" the 13 belongs to the number.
+_ISBN_LABEL = re.compile(
+    r"^\s*ISBN(?:[-\s]?1[03](?=[\s:]))?\s*:?\s*", re.IGNORECASE
+)
 
 
-def normalize_isbn(raw: str) -> str | None:
+def _clean_isbn(raw: str) -> str:
+    return _ISBN_CHARS.sub("", _ISBN_LABEL.sub("", raw)).upper()
+
+
+def normalize_isbn(raw: object) -> str | None:
     """Return the ISBN-13 form of a valid ISBN-10/13, else None.
 
-    Strips hyphens and spaces, validates the check digit, and converts
-    ISBN-10 to ISBN-13 so the same edition deduplicates regardless of
-    which form a source reports.
+    Strips an "ISBN-13:"-style label, hyphens, and spaces, validates
+    the check digit, and converts ISBN-10 to ISBN-13 so the same
+    edition deduplicates regardless of which form a source reports.
+    Non-string input answers None — registry identifier lists carry
+    null and non-string entries in the wild.
     """
-    cleaned = _ISBN_CHARS.sub("", raw).upper()
+    if not isinstance(raw, str):
+        return None
+    cleaned = _clean_isbn(raw)
     if len(cleaned) == 10 and _valid_isbn10(cleaned):
         return _isbn10_to_13(cleaned)
     if len(cleaned) == 13 and cleaned.isdigit() and _valid_isbn13(cleaned):
@@ -139,10 +155,17 @@ def resolve_book(identifier: str) -> Book:
 
 
 def _looks_like_isbn(raw: str) -> bool:
-    """Whether a string is ISBN-shaped (right length), checksum aside."""
-    cleaned = _ISBN_CHARS.sub("", raw).upper()
+    """Whether a string is ISBN-shaped (right length), checksum aside.
+
+    Shares normalize_isbn's cleaner so the two can't disagree on what
+    counts as ISBN-shaped, and accepts an X anywhere a check digit
+    could sit — a mistyped "...X" 13-form must get the invalid-ISBN
+    message, not a doomed title search of the digit string.
+    """
+    cleaned = _clean_isbn(raw)
     return bool(
-        re.fullmatch(r"\d{9}[\dX]", cleaned) or re.fullmatch(r"\d{13}", cleaned)
+        re.fullmatch(r"\d{9}[\dX]", cleaned)
+        or re.fullmatch(r"\d{12}[\dX]", cleaned)
     )
 
 
@@ -211,12 +234,14 @@ def _from_crossref(doi: str) -> Book | None:
         return None
     titles = message.get("title") or []
     isbns = message.get("ISBN") or []
+    # Crossref's unknown-date forms include [[null]] AND [[]] (an empty
+    # inner list) — indexing [0][0] blindly would crash on the latter.
+    date_parts = (message.get("issued", {}).get("date-parts") or [[]])[0]
+    year = str(date_parts[0]) if date_parts and date_parts[0] else ""
     return Book(
         title=" ".join(titles[0].split()) if titles else doi,
         authors=_crossref_authors(message),
-        year=str(
-            (message.get("issued", {}).get("date-parts") or [[""]])[0][0] or ""
-        ),
+        year=year,
         publisher=message.get("publisher", ""),
         edition=str(message.get("edition-number") or ""),
         isbn=next((n for n in (normalize_isbn(i) for i in isbns) if n), None),
@@ -235,23 +260,41 @@ def _crossref_authors(message: dict) -> list[str]:
     return authors
 
 
-def _from_title(ref: str) -> Book:
-    # Isolate each backend (see _from_isbn): a Google Books 429 must not
-    # discard a confident Open Library match.
-    candidates: list[Book] = []
-    backend_error: httpx.HTTPError | None = None
-    for lookup in (_openlibrary_by_title, _google_by_title):
-        try:
-            candidates += lookup(ref)
-        except httpx.HTTPError as exc:
-            backend_error = backend_error or exc
-    best, best_ratio = None, 0.0
+def _best_book_match(
+    ref: str, candidates: list[Book], best: Book | None, best_ratio: float
+) -> tuple[Book | None, float]:
+    wanted = normalize_title(ref)
+    if not wanted:
+        # SequenceMatcher("", "") is 1.0 — see resolver._best_title_match.
+        return best, best_ratio
     for book in candidates:
         ratio = difflib.SequenceMatcher(
-            None, normalize_title(ref), normalize_title(book.title)
+            None, wanted, normalize_title(book.title)
         ).ratio()
         if ratio > best_ratio:
             best, best_ratio = book, ratio
+    return best, best_ratio
+
+
+def _from_title(ref: str) -> Book:
+    # Isolate each backend (see _from_isbn): a Google Books 429 must not
+    # discard a confident Open Library match. Score per backend and stop
+    # once one clears the confidence bar — every further call (usually
+    # to throttle-prone Google Books) would be wasted work that feeds
+    # the very 429s the isolation defends against.
+    best: Book | None = None
+    best_ratio = 0.0
+    backend_error: httpx.HTTPError | None = None
+    for lookup in (_openlibrary_by_title, _google_by_title):
+        try:
+            best, best_ratio = _best_book_match(
+                ref, lookup(ref), best, best_ratio
+            )
+        except httpx.HTTPError as exc:
+            backend_error = backend_error or exc
+            continue
+        if best_ratio >= _TITLE_MATCH_THRESHOLD:
+            break
     if best and best_ratio >= _TITLE_MATCH_THRESHOLD:
         return best
     # A confident match would have returned above. With only a weak

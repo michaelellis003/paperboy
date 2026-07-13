@@ -453,3 +453,106 @@ def test_transient_error_wins_over_offer(monkeypatch, paper_factory):
     monkeypatch.setattr(arxiv, "search", lambda q, max_results: [candidate])
     with pytest.raises(httpx.HTTPStatusError):
         resolver.resolve("Attention Is All You Need")
+
+
+# --- review-round fixes -------------------------------------------------
+
+
+def test_classifier_uses_domain_suffixes_not_substrings():
+    # amazon.science hosts papers; notgithub.com is not GitHub; path
+    # segments like /bookmark are not /book. All must get the generic
+    # hint, not a wrong specific one.
+    for url in (
+        "https://www.amazon.science/publications/x",
+        "https://notgithub.com/x",
+        "https://example.com/bookmark/123",
+        "https://pubs.example.org/booklets/wp17.html",
+    ):
+        assert "publisher landing URLs" in resolver._classify_url(url)
+    # The real cases still classify.
+    assert "add_book" in resolver._classify_url(
+        "https://www.amazon.com/dp/1470421992"
+    )
+    assert "add_book" in resolver._classify_url(
+        "https://bookstore.ams.org/stml-78/"
+    )
+    assert "add_book" in resolver._classify_url(
+        "https://global.oup.com/academic/book/9780198522195"
+    )
+    assert "file-share" in resolver._classify_url(
+        "https://github.com/user/repo/blob/main/x.pdf"
+    )
+
+
+def test_fetch_pdf_rejects_content_length_over_cap(monkeypatch):
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200,
+                    headers={"content-length": str(10**10)},
+                    content=b"%PDF-1.7",
+                )
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="larger than"):
+        resolver.fetch_pdf("https://host/huge.pdf")
+
+
+def test_fetch_pdf_rejects_oversized_body_without_length(monkeypatch):
+    big = b"%PDF-" + b"0" * (resolver._MAX_FETCH_BYTES + 10)
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, content=big)
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="larger than"):
+        resolver.fetch_pdf("https://host/huge.pdf")
+
+
+def test_fetch_pdf_streams_valid_pdf(monkeypatch):
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, content=b"%PDF-1.7 body")
+            )
+        ),
+    )
+    assert resolver.fetch_pdf("https://host/x.pdf") == b"%PDF-1.7 body"
+
+
+def test_fetch_pdf_rejects_html_early(monkeypatch):
+    monkeypatch.setattr(
+        resolver,
+        "client",
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200,
+                    content=b"<html>" + b"x" * 5000,
+                    headers={"content-type": "text/html"},
+                )
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="non-PDF content"):
+        resolver.fetch_pdf("https://host/notpdf")
+
+
+def test_degenerate_title_never_auto_accepts(monkeypatch, paper_factory):
+    # normalize("!!!") == normalize("???") == "" and
+    # SequenceMatcher("", "") == 1.0 — must not resolve a wrong paper.
+    candidate = paper_factory(title="???", arxiv_id=None, doi="10.1/x")
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [candidate])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="arXiv id, DOI, or"):
+        resolver.resolve("!!!")

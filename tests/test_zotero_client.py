@@ -51,18 +51,25 @@ class FakeZotero:
         return self.queue + self.library_items
 
     def item_template(self, item_type):
-        # Mirror pyzotero: the template carries exactly the fields valid
-        # for the type. Only paper-ish types have a DOI field; book and
-        # kin do not, so writing DOI to them would be rejected.
-        template = {"itemType": item_type}
-        if item_type in ("journalArticle", "preprint", "conferencePaper"):
-            template["DOI"] = ""
-        return template
+        # Mirror pyzotero + the current Zotero schema (v42): the
+        # template carries exactly the fields valid for the type, and
+        # every type this server creates — including book, report, and
+        # kin — has a DOI field.
+        return {"itemType": item_type, "DOI": ""}
 
     def attachment_simple(self, files, parentid=None):
+        # Mirror pyzotero: every call creates a NEW child attachment
+        # item, even when the file blob dedupes as "unchanged".
         self.attached = getattr(self, "attached", [])
         self.attached.append((parentid, list(files)))
+        self.child_items = getattr(self, "child_items", {})
+        self.child_items.setdefault(parentid, []).append(
+            {"data": {"contentType": "application/pdf"}}
+        )
         return {"success": {"0": "AKEY"}, "failure": {}, "unchanged": {}}
+
+    def children(self, key):
+        return getattr(self, "child_items", {}).get(key, [])
 
     def create_items(self, payload):
         if self.fail_create:
@@ -89,8 +96,29 @@ class FakeZotero:
     def add_tags(self, item, tag):
         self.tagged.append((item["key"], tag))
 
+    def _check_version(self, item_key, sent_version):
+        # Mirror the Zotero API's If-Unmodified-Since-Version: every
+        # write bumps the item's version, and a later write carrying a
+        # stale version fails with 412. Sequential addto_collection
+        # calls on one stale dict were failing in production while a
+        # version-blind fake passed them.
+        self.server_versions = getattr(self, "server_versions", {})
+        current = self.server_versions.get(item_key, sent_version)
+        if sent_version != current:
+            raise ValueError(
+                f"412 Precondition Failed: stale version for {item_key}"
+            )
+        self.server_versions[item_key] = current + 1
+
     def addto_collection(self, key, item):
-        item["data"].setdefault("collections", []).append(key)
+        # Mirror pyzotero: PATCHes the server (version-guarded) and does
+        # NOT mutate the passed item dict. Code that wants post-filing
+        # membership must track it itself; a fake that mutated in place
+        # masked exactly that bug. The PATCH is recorded for asserting.
+        sent = item.get("version") or item["data"].get("version") or 0
+        self._check_version(item["key"], sent)
+        self.collection_adds = getattr(self, "collection_adds", [])
+        self.collection_adds.append((key, item["key"]))
 
     def deletefrom_collection(self, key, item):
         self.uncollected = getattr(self, "uncollected", [])
@@ -109,8 +137,14 @@ class FakeZotero:
         for key in payload:
             if key not in base and key not in self.temp_keys:
                 raise ValueError(f"Invalid keys present in item: {key}")
+        self._check_version(payload["key"], payload.get("version") or 0)
         self.updated = getattr(self, "updated", [])
         self.updated.append(payload["key"])
+        if "collections" in payload:
+            self.collection_writes = getattr(self, "collection_writes", [])
+            self.collection_writes.append(
+                (payload["key"], list(payload["collections"]))
+            )
         if payload.get("deleted"):
             self.trashed = getattr(self, "trashed", [])
             self.trashed.append(payload["key"])
@@ -519,8 +553,8 @@ def test_requeue_of_kept_item_rejoins_queue(fake_api, paper_factory):
     fake_api.library_items = [kept]
     key, status = zotero_client.add_paper(paper_factory())
     assert (key, status) == ("KEPT", "requeued")
-    # rejoined the queue collection, no duplicate record created
-    assert kept["data"]["collections"] == ["TOPICAL", "COLL"]
+    # rejoined the queue collection (one union write), no duplicate
+    assert ("KEPT", ["TOPICAL", "COLL"]) in fake_api.collection_writes
     assert fake_api.created == []
 
 
@@ -602,7 +636,9 @@ def test_add_existing_paper_gains_collections(fake_api, paper_factory):
         paper_factory(), collections=["Topical"]
     )
     assert (key, status) == ("EXISTING", "already_queued")
-    assert fake_api.queue[0]["data"]["collections"] == ["COLL", "NEWCOLL"]
+    # One union write files it into the new topical collection while
+    # keeping the existing queue membership.
+    assert fake_api.collection_writes == [("EXISTING", ["COLL", "NEWCOLL"])]
 
 
 def test_file_by_refs(fake_api):
@@ -617,7 +653,7 @@ def test_file_by_refs(fake_api):
     )
     assert filed == ["Alpha"]
     assert misses == ["missing-ref"]
-    assert fake_api.queue[0]["data"]["collections"] == ["NEWCOLL"]
+    assert fake_api.collection_adds == [("NEWCOLL", "A")]
 
 
 def test_file_by_refs_no_match_creates_no_collection(fake_api):
@@ -790,11 +826,24 @@ def test_add_book_creates_book_item(fake_api):
     assert item["ISBN"] == "9781470421991"
     assert item["publisher"] == "AMS"
     assert item["numPages"] == "221"
-    assert "DOI" not in item  # book has no DOI field
+    assert item["DOI"] == ""  # DOI-less book leaves the field empty
     assert item["collections"] == ["NEWCOLL"]
 
 
-def test_add_book_stores_doi_in_extra(fake_api):
+def test_add_book_stores_doi_in_doi_field(fake_api):
+    # The current Zotero schema gives book a real DOI field.
+    book = Book(title="X", authors=[], doi="10.1090/stml/078")
+    zotero_client.add_book(book)
+    assert fake_api.created[0]["DOI"] == "10.1090/stml/078"
+    assert "extra" not in fake_api.created[0]
+
+
+def test_add_book_doi_falls_back_to_extra_without_field(fake_api, monkeypatch):
+    # An old cached schema whose book template lacks DOI: the DOI must
+    # still land somewhere searchable.
+    monkeypatch.setattr(
+        fake_api, "item_template", lambda item_type: {"itemType": item_type}
+    )
     book = Book(title="X", authors=[], doi="10.1090/stml/078")
     zotero_client.add_book(book)
     assert fake_api.created[0]["extra"] == "DOI: 10.1090/stml/078"
@@ -837,7 +886,7 @@ def test_paper_does_not_dedup_against_a_book(fake_api, paper_factory):
 
 @pytest.mark.parametrize(
     "grey_type",
-    ["report", "thesis", "manuscript", "document", "conferencePaper"],
+    ["report", "thesis", "manuscript", "document"],
 )
 def test_paper_does_not_title_match_grey_lit_item(
     fake_api, paper_factory, grey_type
@@ -858,6 +907,27 @@ def test_paper_does_not_title_match_grey_lit_item(
     # No shared id — only the fuzzy title bridge could (wrongly) match.
     paper = paper_factory(title="Deep Learning", arxiv_id=None, doi="10.1/dl")
     assert zotero_client.find_item(paper) is None
+
+
+def test_paper_title_matches_conference_paper(fake_api, paper_factory):
+    # Connector-saved CS papers land as conferencePaper, usually with no
+    # DOI/arXiv id — the title bridge is their only dedup path. Excluding
+    # them re-delivered already-sent papers after an upgrade.
+    fake_api.library_items = [
+        {
+            "key": "CONF",
+            "data": {
+                "itemType": "conferencePaper",
+                "title": "Attention Is All You Need",
+                "collections": [],
+            },
+        }
+    ]
+    paper = paper_factory(
+        title="Attention Is All You Need", arxiv_id=None, doi="10.1/aiayn"
+    )
+    item = zotero_client.find_item(paper)
+    assert item is not None and item["key"] == "CONF"
 
 
 def test_exact_doi_still_dedups_across_item_types(fake_api, paper_factory):
@@ -883,7 +953,7 @@ def test_exact_doi_still_dedups_across_item_types(fake_api, paper_factory):
 
 
 def test_attach_pdf_item_creates_and_attaches(fake_api):
-    key, attached = zotero_client.attach_pdf_item(
+    key, status, attached = zotero_client.attach_pdf_item(
         item_type="report",
         title="A Working Paper",
         authors=["Jane Doe"],
@@ -891,12 +961,76 @@ def test_attach_pdf_item_creates_and_attaches(fake_api):
         year="2024",
         collections=["Grey Lit"],
     )
-    assert key == "NEWITEM"
+    assert (key, status) == ("NEWITEM", "created")
     assert attached is True
     item = fake_api.created[0]
     assert item["itemType"] == "report"
     assert item["collections"] == ["NEWCOLL"]
     assert fake_api.attached == [("NEWITEM", ["/tmp/A_Working_Paper.pdf"])]
+
+
+def test_attach_pdf_item_reuses_same_type_and_title(fake_api):
+    # Retry safety: a re-run after a failed upload attaches to the item
+    # already created instead of minting a duplicate that nothing
+    # (by design) will ever title-dedup.
+    fake_api.library_items = [
+        {
+            "key": "GREY",
+            "data": {
+                "itemType": "report",
+                "title": "A Working Paper",
+                "collections": [],
+            },
+        }
+    ]
+    key, status, attached = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=["Jane Doe"],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert (key, status) == ("GREY", "existing")
+    assert attached is True
+    assert fake_api.created == []
+    assert fake_api.attached == [("GREY", ["/tmp/x.pdf"])]
+
+
+def test_attach_pdf_item_does_not_reuse_other_types(fake_api):
+    # Same title but a different item type is a different work.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "title": "A Working Paper",
+                "collections": [],
+            },
+        }
+    ]
+    key, status, _ = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=[],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert (key, status) == ("NEWITEM", "created")
+
+
+def test_attach_file_swallows_upload_exception(fake_api, monkeypatch):
+    # A raised upload failure after create_items succeeded must read as
+    # "attachment did not upload", never "could not create the item".
+    def boom(files, parentid=None):
+        raise RuntimeError("upload broke mid-flight")
+
+    monkeypatch.setattr(fake_api, "attachment_simple", boom)
+    key, status, attached = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=[],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert (key, status) == ("NEWITEM", "created")
+    assert attached is False
 
 
 def test_item_collection_names(fake_api):
@@ -908,3 +1042,461 @@ def test_item_collection_names(fake_api):
         "Reading Queue",
         "Theory",
     ]
+
+
+# --- review-round fixes -------------------------------------------------
+
+
+def test_book_isbn_field_with_multiple_isbns_dedups(fake_api):
+    # Zotero's MARC translator stores several ISBNs space-separated in
+    # the one field; each token must be tried, not the concatenation.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "ISBN": "9780306406157 0306406152",
+                "title": "Something",
+                "collections": [],
+            },
+        }
+    ]
+    book = Book(title="Something", authors=[], isbn="978-0-306-40615-7")
+    key, status, _ = zotero_client.add_book(book)
+    assert (key, status) == ("BK", "existing")
+    assert fake_api.created == []
+
+
+def test_catalog_existing_receipt_includes_newly_filed_collection(
+    fake_api, paper_factory
+):
+    # pyzotero's addto_collection does not mutate the passed item dict;
+    # the receipt must still report the post-filing membership.
+    fake_api.existing_collections.append(
+        {"key": "TH", "data": {"name": "Theory"}}
+    )
+    fake_api.library_items = [
+        {
+            "key": "EX",
+            "data": {
+                "itemType": "journalArticle",
+                "DOI": "10.1/x",
+                "title": "A Test Paper",
+                "collections": [],
+            },
+        }
+    ]
+    _, status, names = zotero_client.catalog_paper(
+        paper_factory(arxiv_id=None, doi="10.1/x"), collections=["Theory"]
+    )
+    assert status == "existing"
+    assert names == ["Theory"]
+
+
+def test_add_paper_skips_receipt_names_on_queue_path(
+    fake_api, paper_factory, monkeypatch
+):
+    # queue_papers/send_papers discard collection names; computing them
+    # cost a full post-mutation collections fetch per paper.
+    def forbidden(keys):
+        raise AssertionError("names must not be computed on the queue path")
+
+    monkeypatch.setattr(zotero_client, "_receipt_names", forbidden)
+    key, status = zotero_client.add_paper(paper_factory())
+    assert (key, status) == ("NEWITEM", "created")
+
+
+def test_receipt_names_degrade_on_zotero_failure(fake_api, monkeypatch):
+    # Names are receipt garnish computed after the mutation — a Zotero
+    # hiccup there must degrade to [], never destroy the receipt.
+    def boom():
+        raise RuntimeError("zotero down")
+
+    monkeypatch.setattr(zotero_client, "_collections_raw", boom)
+    assert zotero_client._receipt_names(["COLL"]) == []
+
+
+# --- round-A fixes -------------------------------------------------------
+
+
+def test_multi_collection_filing_is_one_versioned_write(
+    fake_api, paper_factory
+):
+    # Two sequential addto_collection calls on one stale dict 412
+    # against the real API; filing into several collections must be a
+    # single union write. The fake's version check enforces this.
+    fake_api.existing_collections += [
+        {"key": "T1", "data": {"name": "Theory"}},
+        {"key": "T2", "data": {"name": "ML"}},
+    ]
+    fake_api.library_items = [
+        {
+            "key": "EX",
+            "version": 7,
+            "data": {
+                "itemType": "journalArticle",
+                "DOI": "10.1/x",
+                "title": "A Test Paper",
+                "collections": [],
+            },
+        }
+    ]
+    _, status, names = zotero_client.catalog_paper(
+        paper_factory(arxiv_id=None, doi="10.1/x"),
+        collections=["Theory", "ML"],
+    )
+    assert status == "existing"
+    assert names == ["Theory", "ML"]
+    assert fake_api.collection_writes == [("EX", ["T1", "T2"])]
+
+
+def test_filing_nothing_new_writes_nothing(fake_api, paper_factory):
+    # An item already in every requested collection must not be PATCHed
+    # at all — a no-op write still bumps versions and burns quota.
+    fake_api.library_items = [
+        {
+            "key": "EX",
+            "data": {
+                "itemType": "journalArticle",
+                "DOI": "10.1/x",
+                "title": "A Test Paper",
+                "collections": [],
+            },
+        }
+    ]
+    _, status, _ = zotero_client.catalog_paper(
+        paper_factory(arxiv_id=None, doi="10.1/x")
+    )
+    assert status == "existing"
+    assert getattr(fake_api, "collection_writes", []) == []
+
+
+def test_book_isbn_field_with_internal_spaces_dedups(fake_api):
+    # A single ISBN written with internal spaces ("978 0 306 40615 7")
+    # must dedup — tokenizing alone would shred it into invalid pieces.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "ISBN": "978 0 306 40615 7",
+                "title": "Something",
+                "collections": [],
+            },
+        }
+    ]
+    book = Book(title="Something", authors=[], isbn="9780306406157")
+    key, status, _ = zotero_client.add_book(book)
+    assert (key, status) == ("BK", "existing")
+
+
+def test_book_isbn_matches_any_stored_token(fake_api):
+    # MARC records repeat 020 for hbk/pbk/ebook ISBNs; the incoming
+    # ISBN may match any of them, not just the first.
+    fake_api.library_items = [
+        {
+            "key": "BK",
+            "data": {
+                "itemType": "book",
+                "ISBN": "9781470421991 9780306406157",
+                "title": "Something",
+                "collections": [],
+            },
+        }
+    ]
+    book = Book(title="Something", authors=[], isbn="9780306406157")
+    key, status, _ = zotero_client.add_book(book)
+    assert (key, status) == ("BK", "existing")
+    assert fake_api.created == []
+
+
+def test_file_by_refs_two_refs_same_item_files_once(fake_api):
+    # A ref by DOI and a ref by title can name the same queue item; the
+    # second must not trigger a stale-version write (412) or a double
+    # count — the item is filed once and the extra ref is consumed.
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {"title": "Alpha", "DOI": "10.1000/alpha"},
+        }
+    ]
+    filed, misses, ambiguous = zotero_client.file_by_refs(
+        ["10.1000/alpha", "Alpha"], "Topical"
+    )
+    assert filed == ["Alpha"]
+    assert misses == []
+    assert ambiguous == []
+    assert fake_api.collection_adds == [("NEWCOLL", "A")]
+
+
+def test_unfile_by_refs_two_refs_same_item_removes_once(fake_api):
+    fake_api.existing_collections.append(
+        {"key": "TOPIC", "data": {"name": "Topical"}}
+    )
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Alpha",
+                "DOI": "10.1000/alpha",
+                "collections": ["TOPIC"],
+            },
+        }
+    ]
+    removed, misses, ambiguous = zotero_client.unfile_by_refs(
+        ["10.1000/alpha", "Alpha"], "Topical"
+    )
+    assert removed == ["Alpha"]
+    assert misses == []
+    assert ambiguous == []
+    assert fake_api.uncollected == [("TOPIC", "A")]
+
+
+# --- round-D fixes -------------------------------------------------------
+
+
+def test_partially_consumed_ambiguity_still_refuses(fake_api):
+    # Item A filed via its key; the shared title still matches A and B.
+    # Acting on B by elimination would be guessing — the refusal
+    # contract holds even when one candidate was already handled.
+    fake_api.queue = [
+        {"key": "AAAA1111", "data": {"title": "Deep Learning"}},
+        {"key": "BBBB2222", "data": {"title": "Deep Learning"}},
+    ]
+    filed, _misses, ambiguous = zotero_client.file_by_refs(
+        ["AAAA1111", "Deep Learning"], "Topical"
+    )
+    assert filed == ["Deep Learning"]  # A only
+    assert fake_api.collection_adds == [("NEWCOLL", "AAAA1111")]
+    assert len(ambiguous) == 1  # the title ref refused, both candidates
+    assert {c["key"] for c in ambiguous[0]["candidates"]} == {
+        "AAAA1111",
+        "BBBB2222",
+    }
+
+
+def test_remove_partially_consumed_ambiguity_still_refuses(fake_api):
+    fake_api.queue = [
+        {"key": "AAAA1111", "data": {"title": "Deep Learning"}},
+        {"key": "BBBB2222", "data": {"title": "Deep Learning"}},
+    ]
+    removed, _misses, ambiguous = zotero_client.remove_by_refs(
+        ["AAAA1111", "Deep Learning"]
+    )
+    assert len(removed) == 1  # A only; B untouched
+    assert len(ambiguous) == 1
+    assert fake_api.trashed == ["AAAA1111"]
+
+
+def test_remove_by_refs_aliased_refs_remove_once(fake_api):
+    # DOI ref and title ref naming the same item: removed once, second
+    # ref consumed silently (not a miss).
+    fake_api.queue = [
+        {"key": "A", "data": {"title": "Alpha", "DOI": "10.1000/alpha"}},
+    ]
+    removed, misses, _ambiguous = zotero_client.remove_by_refs(
+        ["10.1000/alpha", "Alpha"]
+    )
+    assert len(removed) == 1
+    assert misses == []
+    assert fake_api.trashed == ["A"]
+
+
+def test_attach_pdf_item_rerun_does_not_duplicate_attachment(fake_api):
+    # First run creates the item and attaches; a re-run reuses the item
+    # AND skips the upload — pyzotero would create a duplicate child
+    # attachment item per call.
+    first = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=["Jane Doe"],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert first == ("NEWITEM", "created", True)
+    fake_api.library_items = [
+        {
+            "key": "NEWITEM",
+            "data": {
+                "itemType": "report",
+                "title": "A Working Paper",
+                "collections": [],
+            },
+        }
+    ]
+    second = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=["Jane Doe"],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert second == ("NEWITEM", "existing", True)
+    assert len(fake_api.attached) == 1  # no second upload
+
+
+# --- round-F fixes -------------------------------------------------------
+
+
+def test_distinct_non_latin_titles_do_not_merge(fake_api, paper_factory):
+    # Both titles used to normalize to "" and false-match everywhere.
+    fake_api.queue = [
+        {
+            "key": "RU1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Квантовая механика и интегралы",
+            },
+        }
+    ]
+    other = paper_factory(
+        title="Введение в теорию вероятностей", arxiv_id=None, doi=None
+    )
+    assert zotero_client.find_item(other) is None
+
+
+def test_same_non_latin_title_still_dedups(fake_api, paper_factory):
+    fake_api.queue = [
+        {
+            "key": "RU1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Квантовая механика и интегралы",
+            },
+        }
+    ]
+    same = paper_factory(
+        title="Квантовая механика и интегралы!", arxiv_id=None, doi=None
+    )
+    item = zotero_client.find_item(same)
+    assert item is not None and item["key"] == "RU1"
+
+
+def test_degenerate_titles_never_match(fake_api, paper_factory):
+    # All-punctuation titles normalize to ""; two of them are NOT the
+    # same work.
+    fake_api.queue = [
+        {
+            "key": "P1",
+            "data": {"itemType": "journalArticle", "title": "???"},
+        }
+    ]
+    other = paper_factory(title="!!!", arxiv_id=None, doi=None)
+    assert zotero_client.find_item(other) is None
+
+
+def test_find_attach_target_refuses_degenerate_title(fake_api):
+    fake_api.library_items = [
+        {"key": "X1", "data": {"itemType": "report", "title": "***"}}
+    ]
+    assert zotero_client.find_attach_target("report", "!!!") is None
+
+
+def test_untitled_item_receipts_fall_back_to_key(fake_api):
+    # The real API serves title: "" (key present) for untitled items;
+    # receipts must fall back to the item key, not render blank.
+    fake_api.queue = [
+        {"key": "UNTITLED1", "data": {"title": "", "collections": []}}
+    ]
+    entries = zotero_client.list_queue()
+    assert entries[0]["title"] == "UNTITLED1"
+
+
+def test_whitespace_only_title_receipts_fall_back_to_key(fake_api):
+    fake_api.queue = [
+        {"key": "WS1", "data": {"title": "   ", "collections": []}}
+    ]
+    assert zotero_client.list_queue()[0]["title"] == "WS1"
+
+
+def test_scholarly_ref_for_key_strips_whitespace_title(fake_api, env):
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    fake_api.queue = [
+        {"key": "WSITEM01", "data": {"title": "   ", "collections": []}}
+    ]
+    # A whitespace-only title must not become the scholarly ref — with
+    # None, ordinary resolution proceeds on the key the user passed.
+    assert zotero_client.scholarly_ref_for_key("WSITEM01") is None
+
+
+def test_ref_matches_padded_stored_title(fake_api):
+    # Receipts display the STRIPPED title; matching that displayed
+    # title back must work even when the stored value is padded.
+    fake_api.queue = [
+        {"key": "A", "data": {"title": "  Foo Bar  ", "collections": []}}
+    ]
+    removed, misses, _ = zotero_client.remove_by_refs(["Foo Bar"])
+    assert [e["title"] for e in removed] == ["Foo Bar"]
+    assert misses == []
+
+
+# --- round-J fixes: strip-before-use covers DOI/url too -------------------
+
+
+def test_whitespace_doi_does_not_beat_real_title_as_ref(fake_api, env):
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    fake_api.queue = [
+        {
+            "key": "WSDOI001",
+            "data": {"DOI": "   ", "title": "A Real Title", "collections": []},
+        }
+    ]
+    assert zotero_client.scholarly_ref_for_key("WSDOI001") == "A Real Title"
+
+
+def test_list_queue_ref_skips_whitespace_doi(fake_api):
+    fake_api.queue = [
+        {
+            "key": "WSDOI001",
+            "data": {"DOI": "   ", "url": "", "title": "T", "collections": []},
+        }
+    ]
+    assert zotero_client.list_queue()[0]["ref"] == "WSDOI001"
+
+
+def test_padded_stored_doi_matches_back(fake_api):
+    # list_queue displays/advertises stripped values; the clean DOI a
+    # receipt shows must match the padded stored field.
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Alpha",
+                "DOI": "  10.1234/abc  ",
+                "collections": [],
+            },
+        }
+    ]
+    removed, misses, _ = zotero_client.remove_by_refs(["10.1234/abc"])
+    assert [e["title"] for e in removed] == ["Alpha"]
+    assert misses == []
+
+
+def test_padded_stored_doi_dedups_in_matches(fake_api, paper_factory):
+    fake_api.queue = [
+        {
+            "key": "P1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Different Words",
+                "DOI": "  10.1234/abc  ",
+                "collections": [],
+            },
+        }
+    ]
+    paper = paper_factory(title="Other", arxiv_id=None, doi="10.1234/abc")
+    item = zotero_client.find_item(paper)
+    assert item is not None and item["key"] == "P1"
+
+
+def test_seed_ids_strip_padded_doi(fake_api):
+    fake_api.queue = [
+        {"key": "S1", "data": {"DOI": "  10.1/x  ", "collections": []}}
+    ]
+    assert zotero_client.seed_ids() == ["DOI:10.1/x"]

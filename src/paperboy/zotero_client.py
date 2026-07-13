@@ -107,10 +107,30 @@ def _tags(item: dict) -> set[str]:
     return {t["tag"] for t in item["data"].get("tags", [])}
 
 
-# The item types this pipeline creates for papers, and the only types a
-# fuzzy title match may bridge to. Exact id matches (arXiv/DOI) are
-# identity-safe across any type; a normalized-title match is not.
-_PAPER_ITEM_TYPES = ("preprint", "journalArticle")
+def _field(data: dict[str, Any], key: str) -> str:
+    """A stored text field, stripped.
+
+    The Zotero API stores what clients send verbatim — externally
+    created items can carry padded or whitespace-only DOI/url/title
+    values, which are truthy but useless as refs, search queries, or
+    match keys. Every read of a stored text field for matching,
+    resolution, or display goes through this.
+    """
+    return (data.get(key) or "").strip()
+
+
+def display_title(data: dict[str, Any], fallback: str) -> str:
+    """Human-readable item name: non-blank title, else the fallback key."""
+    return _field(data, "title") or fallback
+
+
+# The item types a fuzzy title match may bridge to: what this pipeline
+# creates for papers, plus conferencePaper — the type Zotero's browser
+# connector saves CS papers as, usually with no DOI/arXiv id, so the
+# title bridge is their ONLY dedup path (excluding it re-delivers
+# already-sent papers after an upgrade). Exact id matches (arXiv/DOI)
+# are identity-safe across any type; a normalized-title match is not.
+_PAPER_ITEM_TYPES = ("preprint", "journalArticle", "conferencePaper")
 
 
 def _matches(paper: Paper, data: dict[str, Any]) -> bool:
@@ -120,7 +140,7 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
         or data.get("archiveID", "") == f"arXiv:{paper.arxiv_id}"
     ):
         return True
-    doi = data.get("DOI", "")
+    doi = _field(data, "DOI")
     if paper.doi and doi and paper.doi.lower() == doi.lower():
         return True
     # DOI- and arXiv-resolved forms of the same paper can share no id
@@ -133,10 +153,11 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
     item_type = data.get("itemType", "")
     if item_type and item_type not in _PAPER_ITEM_TYPES:
         return False
+    # Both normalized forms must be non-empty: two all-punctuation (or
+    # otherwise normalization-degenerate) titles are not the same work.
+    wanted = normalize_title(paper.title)
     title = data.get("title", "")
-    return bool(
-        title and normalize_title(paper.title) == normalize_title(title)
-    )
+    return bool(title and wanted and wanted == normalize_title(title))
 
 
 def find_item(paper: Paper) -> dict | None:
@@ -170,12 +191,37 @@ def _add_to_collection(item: dict, key: str) -> None:
         _api().addto_collection(key, item)
 
 
+def _add_to_collections(item: dict, keys: list[str]) -> list[str]:
+    """File an item into several collections with ONE write.
+
+    pyzotero's addto_collection PATCHes a body built from the passed
+    (stale) dict, guarded by If-Unmodified-Since-Version — so a second
+    sequential call for the same item fails with 412 (or would lose the
+    first add). Building the membership union locally and writing once
+    sidesteps the conflict. Returns the post-write membership keys.
+    """
+    current = item["data"].get("collections", [])
+    union = list(current)
+    for key in keys:
+        if key and key not in union:
+            union.append(key)
+    if union == list(current):
+        return union
+    version = item.get("version") or item["data"].get("version")
+    _api().update_item(
+        {"key": item["key"], "version": version, "collections": union}
+    )
+    return union
+
+
 def file_item(item: dict, collections: list[str] | None) -> None:
     """File an existing item into named collections (created on demand)."""
-    for name in collections or []:
-        key = collection_key(name, create=True)
-        if key:
-            _add_to_collection(item, key)
+    keys = [
+        key
+        for name in collections or []
+        if (key := collection_key(name, create=True))
+    ]
+    _add_to_collections(item, keys)
 
 
 def _creator_type(template: dict) -> str:
@@ -202,8 +248,10 @@ def _base_template(
     """A Zotero item template of ``item_type`` with the common fields set.
 
     Shared by the paper, book, and attach-PDF item builders. ``DOI`` is
-    only written when the type actually has that field — ``book`` and
-    kin have none, and an invalid key makes create_items fail.
+    only written when the type's template carries that field (the
+    current schema has one on every type this server creates; the guard
+    protects against an older cached template, where an invalid key
+    would make create_items fail).
     """
     template = _api().item_template(item_type)
     template["title"] = title
@@ -238,15 +286,30 @@ def _paper_template(paper: Paper, collection_keys: list[str]) -> dict:
     return template
 
 
+def _receipt_names(keys: list[str]) -> list[str]:
+    """Best-effort collection names for a receipt.
+
+    Runs AFTER the library was mutated, so a Zotero hiccup here must
+    degrade to an unadorned receipt — never destroy it (the caller would
+    retry and re-mutate).
+    """
+    try:
+        return _names_for_keys(keys)
+    except Exception:
+        return []
+
+
 def _upsert_paper(
     paper: Paper, collections: list[str] | None, queue: bool
 ) -> tuple[str, str, list[str]]:
     """Create-or-find a paper item and file it; optionally into the queue.
 
     Returns (item key, status, collection names). With ``queue`` the
-    status is created/requeued/already_queued; without it (catalog-only)
-    created/existing. The collection names are the item's membership
-    after filing, so a duplicate receipt can say where the paper lives.
+    status is created/requeued/already_queued and the names are [] (the
+    queue receipts don't use them — computing them would cost an extra
+    post-mutation API call per paper); without it (catalog-only) status
+    is created/existing and the names are the item's membership AFTER
+    filing, so a duplicate receipt can say where the paper lives.
     """
     api = _api()
     extra_keys = [
@@ -259,16 +322,19 @@ def _upsert_paper(
         was_queued = bool(
             queue_key and queue_key in existing["data"].get("collections", [])
         )
-        for key in ([queue_key] if queue_key else []) + extra_keys:
-            if key:
-                _add_to_collection(existing, key)
-        names = item_collection_names(existing)
+        # One write for all additions (see _add_to_collections); it
+        # returns the post-filing membership, which pyzotero would not
+        # reflect in the passed dict.
+        member_keys = _add_to_collections(
+            existing,
+            [k for k in [queue_key, *extra_keys] if k],
+        )
         if not queue:
-            return existing["key"], "existing", names
+            return existing["key"], "existing", _receipt_names(member_keys)
         # Distinguish a true no-op (already queued) from an item pulled
         # back into the queue, so the receipt is honest.
         status = "already_queued" if was_queued else "requeued"
-        return existing["key"], status, names
+        return existing["key"], status, []
 
     base_keys = ([queue_key] if queue_key else []) + [
         k for k in extra_keys if k
@@ -276,11 +342,8 @@ def _upsert_paper(
     result = api.create_items([_paper_template(paper, base_keys)])
     if result["failed"]:
         raise RuntimeError(f"Zotero rejected item: {result['failed']}")
-    return (
-        result["successful"]["0"]["key"],
-        "created",
-        _names_for_keys(base_keys),
-    )
+    key = result["successful"]["0"]["key"]
+    return key, "created", ([] if queue else _receipt_names(base_keys))
 
 
 def add_paper(
@@ -317,9 +380,29 @@ def catalog_paper(
     return _upsert_paper(paper, collections, queue=False)
 
 
-def _book_isbn(data: dict[str, Any]) -> str | None:
+def _book_isbns(data: dict[str, Any]) -> set[str]:
+    """Every valid ISBN in the item's ISBN field, normalized to ISBN-13.
+
+    Zotero's field is free text: translators (MARC especially) store
+    several ISBNs space- or comma-separated (hbk/pbk/ebook of one
+    record), and single ISBNs are sometimes written with internal
+    spaces ("978 0 306 40615 7"). So the whole field is tried first,
+    then each token — and ALL results count, because the incoming ISBN
+    may match any of the stored ones.
+    """
     raw = data.get("ISBN", "")
-    return normalize_isbn(raw) if raw else None
+    if not raw:
+        return set()
+    isbns = set()
+    whole = normalize_isbn(raw)
+    if whole:
+        isbns.add(whole)
+    for token in re.split(r"[,;\s]+", raw):
+        if token:
+            isbn = normalize_isbn(token)
+            if isbn:
+                isbns.add(isbn)
+    return isbns
 
 
 def _matches_book(book: Book, data: dict[str, Any]) -> bool:
@@ -332,11 +415,12 @@ def _matches_book(book: Book, data: dict[str, Any]) -> bool:
     """
     if data.get("itemType") != "book":
         return False
-    stored_isbn = _book_isbn(data)
-    if book.isbn or stored_isbn:
-        return bool(book.isbn and stored_isbn and book.isbn == stored_isbn)
+    stored_isbns = _book_isbns(data)
+    if book.isbn or stored_isbns:
+        return bool(book.isbn and book.isbn in stored_isbns)
+    wanted = normalize_title(book.title)
     title = data.get("title", "")
-    return bool(title and normalize_title(book.title) == normalize_title(title))
+    return bool(title and wanted and wanted == normalize_title(title))
 
 
 def find_book(book: Book) -> dict | None:
@@ -352,6 +436,10 @@ def find_book(book: Book) -> dict | None:
 
 
 def _book_template(book: Book, collection_keys: list[str]) -> dict:
+    # Zotero's current schema gives ``book`` a real DOI field, so the
+    # DOI travels through _base_template like any other type's. (Older
+    # schemas kept it in Extra; the web API always serves the current
+    # one.)
     template = _base_template(
         "book",
         title=book.title,
@@ -359,6 +447,7 @@ def _book_template(book: Book, collection_keys: list[str]) -> dict:
         abstract=book.abstract,
         date=book.year,
         url=book.url,
+        doi=book.doi,
         collection_keys=collection_keys,
     )
     for field, value in (
@@ -371,8 +460,9 @@ def _book_template(book: Book, collection_keys: list[str]) -> dict:
     ):
         if value:
             template[field] = value
-    # ``book`` has no DOI field; Zotero's convention keeps it in Extra.
-    if book.doi:
+    # Belt-and-suspenders for a template without the DOI field (an old
+    # cached schema): the DOI must land somewhere searchable.
+    if book.doi and "DOI" not in template:
         template["extra"] = f"DOI: {book.doi}"
     return template
 
@@ -394,25 +484,77 @@ def add_book(
     kept_keys = [k for k in extra_keys if k]
     existing = find_book(book)
     if existing:
-        for key in kept_keys:
-            _add_to_collection(existing, key)
-        return existing["key"], "existing", item_collection_names(existing)
+        # One write for all additions; returns post-filing membership
+        # (pyzotero would not reflect it in the passed dict).
+        member_keys = _add_to_collections(existing, kept_keys)
+        return existing["key"], "existing", _receipt_names(member_keys)
     result = api.create_items([_book_template(book, kept_keys)])
     if result["failed"]:
         raise RuntimeError(f"Zotero rejected book: {result['failed']}")
     return (
         result["successful"]["0"]["key"],
         "created",
-        _names_for_keys(kept_keys),
+        _receipt_names(kept_keys),
     )
 
 
 def _attach_file(parent_key: str, pdf_path: str) -> bool:
-    """Upload a local PDF as a child attachment; True when it stuck."""
-    result = _api().attachment_simple([pdf_path], parentid=parent_key)
-    if isinstance(result, dict):
-        return not result.get("failure")
-    return bool(result)
+    """Upload a local PDF as a child attachment; True when it stuck.
+
+    An exception here must NOT propagate: the parent item was already
+    created, and a raised upload failure escaping to the tool's
+    create-item error handler would produce a false "could not create
+    the item" receipt — whose natural retry then duplicates the item.
+    A failed upload is a fact about the attachment, reported as False.
+    """
+    try:
+        result = _api().attachment_simple([pdf_path], parentid=parent_key)
+    except Exception:
+        return False
+    return not result.get("failure")
+
+
+def _has_pdf_attachment(item_key: str) -> bool:
+    """Whether the item already has a PDF child attachment.
+
+    Best-effort: when children can't be listed, answer False and let
+    the upload proceed — a duplicate attachment is the lesser evil to
+    a missing one.
+    """
+    try:
+        children = _api().children(item_key)
+    except Exception:
+        return False
+    return any(
+        child.get("data", {}).get("contentType") == "application/pdf"
+        for child in children
+    )
+
+
+def find_attach_target(item_type: str, title: str) -> dict | None:
+    """An existing item with this exact type and normalized title.
+
+    Makes attach_pdf retry-safe: re-running after a failed upload (or a
+    lost receipt) attaches to the item already created instead of
+    minting a duplicate that nothing would ever dedup.
+    """
+    api = _api()
+    wanted = normalize_title(title)
+    if not wanted:
+        # A normalization-degenerate title (all punctuation/symbols)
+        # must never reuse-by-title — it would match any other such item.
+        return None
+    # titleCreatorYear mode searches titles rather than full text, so a
+    # generic title can't drown the target past the fetch limit (a miss
+    # here degrades to a duplicate item — the exact failure reuse is
+    # supposed to prevent).
+    for item in api.items(q=title, qmode="titleCreatorYear", limit=50):
+        data = item.get("data", {})
+        if data.get("itemType") == item_type and wanted == normalize_title(
+            data.get("title", "")
+        ):
+            return item
+    return None
 
 
 def attach_pdf_item(
@@ -426,16 +568,35 @@ def attach_pdf_item(
     doi: str | None = None,
     abstract: str = "",
     collections: list[str] | None = None,
-) -> tuple[str, bool]:
-    """Create an item of ``item_type`` and attach a local PDF to it.
+) -> tuple[str, str, bool]:
+    """Create-or-find an item of ``item_type`` and attach a local PDF.
 
     The grey-literature path: caller-supplied metadata, no registry
-    lookup, no queue. Returns (item key, whether the PDF attached).
+    lookup, no queue. An existing item with the same type and exact
+    normalized title is reused (filed into any new collections) so a
+    retry after a failed upload never duplicates the item. Returns
+    (item key, "created" | "existing", whether the PDF attached).
     """
     api = _api()
     extra_keys = [
         collection_key(name, create=True) for name in collections or []
     ]
+    kept_keys = [k for k in extra_keys if k]
+
+    existing = find_attach_target(item_type, title)
+    if existing:
+        _add_to_collections(existing, kept_keys)
+        # A successful earlier run already attached the PDF; uploading
+        # again would add a duplicate child attachment (pyzotero creates
+        # a new attachment item per call even when the blob dedupes).
+        if _has_pdf_attachment(existing["key"]):
+            return existing["key"], "existing", True
+        return (
+            existing["key"],
+            "existing",
+            _attach_file(existing["key"], pdf_path),
+        )
+
     template = _base_template(
         item_type,
         title=title,
@@ -444,13 +605,13 @@ def attach_pdf_item(
         date=year,
         url=url,
         doi=doi,
-        collection_keys=[k for k in extra_keys if k],
+        collection_keys=kept_keys,
     )
     result = api.create_items([template])
     if result["failed"]:
         raise RuntimeError(f"Zotero rejected item: {result['failed']}")
     key = result["successful"]["0"]["key"]
-    return key, _attach_file(key, pdf_path)
+    return key, "created", _attach_file(key, pdf_path)
 
 
 def _names_for_keys(keys: list[str]) -> list[str]:
@@ -497,7 +658,10 @@ def scholarly_ref_for_key(ref: str) -> str | None:
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
         return archive.removeprefix("arXiv:")
-    return data.get("DOI") or data.get("title") or None
+    # Stripped (see _field): a whitespace-only DOI or title is truthy
+    # but useless as a search query — returning it would replace the
+    # user's item key with "   " in resolution and receipts.
+    return _field(data, "DOI") or _field(data, "title") or None
 
 
 def _matching_items(ref: str, items: list[dict]) -> list[dict]:
@@ -555,10 +719,22 @@ def file_by_refs(
     items = _queue_items()
     filed, misses, ambiguous = [], [], []
     key: str | None = None
+    done: set[str] = set()
     for ref in refs:
         matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
+            continue
+        # Two refs naming the same item (its DOI and its title, say):
+        # the item is already filed, and a second stale-version write
+        # would 412 against the real API. Consume the ref only when
+        # EVERYTHING it names was already handled — a ref that also
+        # matches a fresh item is still genuinely ambiguous, and acting
+        # on the leftover candidate would be guessing (the docstring's
+        # refusal contract). Candidates list ALL matches so the hints
+        # stay actionable.
+        fresh = [m for m in matches if m["key"] not in done]
+        if not fresh:
             continue
         if len(matches) > 1:
             ambiguous.append(_ambiguity(ref, matches))
@@ -566,8 +742,9 @@ def file_by_refs(
         if key is None:
             key = collection_key(collection_name, create=True)
         if key:
-            _add_to_collection(matches[0], key)
-        filed.append(matches[0]["data"].get("title", matches[0]["key"]))
+            _add_to_collection(fresh[0], key)
+        done.add(fresh[0]["key"])
+        filed.append(display_title(fresh[0]["data"], fresh[0]["key"]))
     return filed, misses, ambiguous
 
 
@@ -591,16 +768,25 @@ def unfile_by_refs(
     api = _api()
     items = api.everything(api.collection_items_top(key))
     removed, misses, ambiguous = [], [], []
+    done: set[str] = set()
     for ref in refs:
         matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
             continue
+        # A second ref naming an item already removed this call would
+        # re-PATCH with a stale version (412) — consume it, but only
+        # when EVERYTHING it names was handled; a ref that also matches
+        # a fresh item is still ambiguous (see file_by_refs).
+        fresh = [m for m in matches if m["key"] not in done]
+        if not fresh:
+            continue
         if len(matches) > 1:
             ambiguous.append(_ambiguity(ref, matches))
             continue
-        api.deletefrom_collection(key, matches[0])
-        removed.append(matches[0]["data"].get("title", matches[0]["key"]))
+        api.deletefrom_collection(key, fresh[0])
+        done.add(fresh[0]["key"])
+        removed.append(display_title(fresh[0]["data"], fresh[0]["key"]))
     return removed, misses, ambiguous
 
 
@@ -626,8 +812,8 @@ def seed_ids(limit: int = 10) -> list[str]:
         archive = data.get("archiveID", "")
         if archive.startswith("arXiv:"):
             ids.append(archive.replace("arXiv:", "ArXiv:", 1))
-        elif data.get("DOI"):
-            ids.append(f"DOI:{data['DOI']}")
+        elif _field(data, "DOI"):
+            ids.append(f"DOI:{_field(data, 'DOI')}")
         if len(ids) >= limit:
             break
     return ids
@@ -646,13 +832,17 @@ def known_identities() -> set[str]:
     keys: set[str] = set()
     for item in items:
         data = item.get("data", {})
-        if data.get("DOI"):
-            keys.add(data["DOI"].lower())
+        if _field(data, "DOI"):
+            keys.add(_field(data, "DOI").lower())
         archive = data.get("archiveID", "")
         if archive.startswith("arXiv:"):
             keys.add(archive.removeprefix("arXiv:"))
         if data.get("title"):
-            keys.add(normalize_title(data["title"]))
+            normalized = normalize_title(data["title"])
+            if normalized:
+                # An empty normalized form would false-match every
+                # equally degenerate title in the dedup intersection.
+                keys.add(normalized)
     return keys
 
 
@@ -681,8 +871,10 @@ def list_queue() -> list[dict]:
             status = "unsent"
         entries.append(
             {
-                "title": data.get("title", item["key"]),
-                "ref": data.get("DOI") or data.get("url") or item["key"],
+                "title": display_title(data, item["key"]),
+                "ref": _field(data, "DOI")
+                or _field(data, "url")
+                or item["key"],
                 # The item key is the only id guaranteed unique when the
                 # library holds exact duplicates; every tool accepts it.
                 "key": item["key"],
@@ -699,12 +891,16 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
     if not needle:
         return False
     lowered = needle.lower()
-    if lowered == data.get("title", "").lower():
+    # Stored fields via _field: receipts display the stripped forms, so
+    # the very values a receipt shows must match back (padded fields on
+    # externally-created items).
+    if lowered == _field(data, "title").lower():
         return True
-    if lowered == data.get("url", "").lower():
+    if lowered == _field(data, "url").lower():
         return True
     found_doi = doi.extract_doi(needle)
-    if found_doi and found_doi.lower() == data.get("DOI", "").lower():
+    stored_doi = doi.extract_doi(_field(data, "DOI"))
+    if found_doi and stored_doi and found_doi.lower() == stored_doi.lower():
         return True
     try:
         arxiv_id = arxiv.normalize_id(needle)
@@ -733,7 +929,7 @@ def _unique_ref(data: dict[str, Any]) -> str:
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
         return archive
-    return data.get("DOI") or data.get("url") or "no other id"
+    return _field(data, "DOI") or _field(data, "url") or "no other id"
 
 
 def remove_by_refs(
@@ -759,15 +955,24 @@ def remove_by_refs(
         return [], [ref for ref in refs if ref.strip()], []
     items = _queue_items()
     removed, misses, ambiguous = [], [], []
+    done: set[str] = set()
     for ref in refs:
         matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
             continue
+        # A later ref naming an item already removed this call (its DOI
+        # and its title, say) is consumed — but only when EVERYTHING it
+        # names was handled. A ref that also matches a fresh item stays
+        # ambiguous: removal is the one place a wrong guess loses state,
+        # so it must never act on the leftover candidate by elimination.
+        fresh = [m for m in matches if m["key"] not in done]
+        if not fresh:
+            continue
         if len(matches) > 1:
             ambiguous.append(_ambiguity(ref, matches))
             continue
-        match = matches[0]
+        match = fresh[0]
         # An item the user filed into topical collections is theirs to
         # keep: only drop its queue membership. Items that live nowhere
         # else go to Zotero's Trash — same as Delete in the Zotero app,
@@ -781,10 +986,10 @@ def remove_by_refs(
             api.deletefrom_collection(queue_key, match)
         else:
             _trash_item(api, match)
-        items.remove(match)
+        done.add(match["key"])
         removed.append(
             {
-                "title": match["data"].get("title", match["key"]),
+                "title": display_title(match["data"], match["key"]),
                 "was_sent": is_sent(match),
                 "kept_in_library": bool(other),
             }

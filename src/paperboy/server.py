@@ -671,10 +671,36 @@ def send_papers(
 
     # Filing is independent of delivery: papers skipped as already
     # sent still get filed into the requested collections. (Not in
-    # dry_run — previews must not mutate.)
+    # dry_run — previews must not mutate.) Two refs can alias one item
+    # (its DOI and its arXiv id), so dedupe by key — a second write on
+    # the same stale dict would 412 — and degrade filing failures into
+    # the receipt: nothing has been delivered yet, and a filing hiccup
+    # must not kill the whole send.
+    filing_failed = False
     if settings().zotero_enabled and collections:
+        filed_keys: set[str] = set()
         for item in already_sent_items:
-            zotero_client.file_item(item, collections)
+            if item["key"] in filed_keys:
+                continue
+            filed_keys.add(item["key"])
+            try:
+                zotero_client.file_item(item, collections)
+            except Exception as exc:
+                filing_failed = True
+                title = zotero_client.display_title(item["data"], item["key"])
+                problems.append(
+                    f"could not file already-sent {title!r} under "
+                    f"{'; '.join(collections)} ({type(exc).__name__}) — "
+                    "the send itself continues"
+                )
+    # The receipts below claim "filed into requested collections" for
+    # already-sent items; a recorded filing failure makes that claim a
+    # contradiction, so suppress it and let the named problem speak.
+    filed_note = (
+        ", filed into requested collections"
+        if collections and not filing_failed
+        else ""
+    )
 
     downloaded, failures, junk = _download_all(sendable)
     junk_keys = {id(paper) for paper in junk}
@@ -694,9 +720,7 @@ def send_papers(
                 queued_note += f", filed under: {'; '.join(collections)}"
             queued_note += ")"
         skips = [f"no open-access PDF: {p.title}" for p in no_pdf] + [
-            "already sent (use force=True to resend"
-            + (", filed into requested collections" if collections else "")
-            + f"): {p.title}"
+            f"already sent (use force=True to resend{filed_note}): {p.title}"
             for p in already_sent
         ]
         tail = "; ".join(skips + problems) or "no valid refs given"
@@ -747,7 +771,7 @@ def send_papers(
         receipt += f" | {note}: {titles}{_oa_hint()}"
     if already_sent:
         titles = "; ".join(paper.title for paper in already_sent)
-        extra = ", filed into requested collections" if collections else ""
+        extra = filed_note
         receipt += (
             f" | Already sent, skipped (force=True to resend{extra}): {titles}"
         )
@@ -991,6 +1015,9 @@ def attach_pdf(
         # A local path that is a directory, unreadable, etc. — any other
         # read failure gets a clean receipt, not an uncaught exception.
         return f"Could not read {src!r}: {exc}."
+    except httpx.InvalidURL as exc:
+        # Not an HTTPError subclass — without this it would escape raw.
+        return f"Not a valid URL: {src!r} ({exc})."
     except ValueError as exc:
         return f"Could not ingest the PDF: {exc}"
     except httpx.HTTPError as exc:
@@ -1005,7 +1032,7 @@ def attach_pdf(
         with open(pdf_path, "wb") as handle:
             handle.write(content)
         try:
-            _, attached = zotero_client.attach_pdf_item(
+            _, status, attached = zotero_client.attach_pdf_item(
                 item_type=item_type,
                 title=title,
                 authors=authors,
@@ -1016,18 +1043,26 @@ def attach_pdf(
                 collections=collections,
             )
         except Exception as exc:
+            # attach_pdf_item swallows upload failures (reported via
+            # ``attached``), so reaching here really does mean the item
+            # was not created.
             return (
                 f"Could not create the Zotero item ({type(exc).__name__}: "
                 f"{exc})."
             )
 
+    verb = "Added" if status == "created" else "Found existing"
     parts = [
-        f"Added {item_type} {title!r} to your library{_filed_note(collections)}"
+        f"{verb} {item_type} {title!r} in your library"
+        f"{_filed_note(collections)}"
     ]
     parts.append(
         "PDF attached"
         if attached
-        else "but the PDF attachment did not upload — retry"
+        else (
+            "the PDF attachment did not upload — re-run attach_pdf to "
+            "retry (the item is kept and reused, not duplicated)"
+        )
     )
     if send:
         receipt, delivered = _deliver([(f"{slug}.pdf", content)])
@@ -1229,11 +1264,26 @@ def send_queue() -> str:
     downloaded, skipped = [], []
     for item in items:
         data = item["data"]
-        title = data.get("title", item["key"])
+        # Display name falls back to the item key, but the key must
+        # never become a RESOLUTION ref — an untitled, id-less item
+        # would send its random key into a doomed network title search
+        # instead of the honest local skip below. Stripped, because a
+        # whitespace-only title (external items) is truthy but useless
+        # as either a name or a search query.
+        raw_title = (data.get("title") or "").strip()
+        title = raw_title or item["key"]
         # Try the strongest identifier first, but fall back to the
         # stored title — items captured from landing-page-only works
         # have no DOI and a URL the resolver rejects.
-        refs = [ref for ref in (data.get("DOI"), data.get("url"), title) if ref]
+        refs = [
+            ref
+            for ref in (
+                (data.get("DOI") or "").strip(),
+                (data.get("url") or "").strip(),
+                raw_title,
+            )
+            if ref
+        ]
         if not refs:
             skipped.append(f"{title} (no DOI, URL, or title)")
             continue

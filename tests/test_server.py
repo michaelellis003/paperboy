@@ -1644,7 +1644,7 @@ def test_attach_pdf_downloads_and_attaches(zotero_env, monkeypatch):
     def fake_attach(**kwargs):
         captured.update(kwargs)
         captured["path_exists"] = os.path.exists(kwargs["pdf_path"])
-        return ("K", True)
+        return ("K", "created", True)
 
     monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7 data")
     monkeypatch.setattr(zotero_client, "attach_pdf_item", fake_attach)
@@ -1688,7 +1688,7 @@ def test_attach_pdf_non_pdf_content(zotero_env, monkeypatch):
 def test_attach_pdf_send_delivers(zotero_env, monkeypatch, sent_documents):
     monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF- bytes")
     monkeypatch.setattr(
-        zotero_client, "attach_pdf_item", lambda **kw: ("K", True)
+        zotero_client, "attach_pdf_item", lambda **kw: ("K", "created", True)
     )
     result = server.attach_pdf(
         "https://host/oa-textbook.pdf",
@@ -1699,3 +1699,165 @@ def test_attach_pdf_send_delivers(zotero_env, monkeypatch, sent_documents):
     )
     assert "sent to your e-reader" in result
     assert len(sent_documents) == 1
+
+
+# --- review-round fixes -------------------------------------------------
+
+
+def test_attach_pdf_invalid_url_gets_clean_receipt(zotero_env, monkeypatch):
+    def raise_invalid(url):
+        raise httpx.InvalidURL("Invalid port: ':1'")
+
+    monkeypatch.setattr(resolver, "fetch_pdf", raise_invalid)
+    result = server.attach_pdf("http://[::1/paper.pdf", "T", ["A"])
+    assert result.startswith("Not a valid URL")
+
+
+def test_attach_pdf_reuse_receipt_says_found_existing(zotero_env, monkeypatch):
+    monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7")
+    monkeypatch.setattr(
+        zotero_client,
+        "attach_pdf_item",
+        lambda **kw: ("K", "existing", True),
+    )
+    result = server.attach_pdf("https://x/y.pdf", "Notes", ["A"])
+    assert "Found existing" in result
+    assert "PDF attached" in result
+
+
+def test_attach_pdf_failed_upload_receipt_promises_safe_retry(
+    zotero_env, monkeypatch
+):
+    monkeypatch.setattr(resolver, "fetch_pdf", lambda url: b"%PDF-1.7")
+    monkeypatch.setattr(
+        zotero_client,
+        "attach_pdf_item",
+        lambda **kw: ("K", "created", False),
+    )
+    result = server.attach_pdf("https://x/y.pdf", "Notes", ["A"])
+    assert "did not upload" in result
+    assert "not duplicated" in result
+
+
+def test_send_papers_files_aliased_already_sent_item_once(
+    zotero_env, monkeypatch, paper_factory, sent_documents
+):
+    # One Zotero item can be named by two refs (its DOI and its arXiv
+    # id). Filing it twice would 412 on the stale second write; it must
+    # be filed once and the send must survive a filing failure.
+    doi_form = paper_factory(
+        title="Published Form", arxiv_id=None, doi="10.1/x", pdf_url=None
+    )
+    arxiv_form = paper_factory(title="Preprint Form")
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: doi_form if ref == "10.1/x" else arxiv_form,
+    )
+    shared_item = {"key": "S1", "data": {"collections": [], "tags": []}}
+    monkeypatch.setattr(zotero_client, "find_item", lambda p: shared_item)
+    monkeypatch.setattr(zotero_client, "is_sent", lambda item: True)
+    filed = []
+    monkeypatch.setattr(
+        zotero_client,
+        "file_item",
+        lambda item, collections: filed.append(item["key"]),
+    )
+    result = server.send_papers(["10.1/x", "2401.12345"], collections=["ML"])
+    assert filed == ["S1"]  # once, not twice
+    assert "already sent" in result
+
+
+def test_send_papers_survives_filing_failure(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    # A filing hiccup on an already-sent item must not kill the send of
+    # the batch's fresh papers.
+    sent_paper = paper_factory(title="Old One", arxiv_id=None, doi="10.1/old")
+    fresh_paper = paper_factory(title="Fresh One")
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: sent_paper if ref == "10.1/old" else fresh_paper,
+    )
+    sent_item = {
+        "key": "S1",
+        "data": {"title": "Old One", "collections": [], "tags": []},
+    }
+    monkeypatch.setattr(
+        zotero_client,
+        "find_item",
+        lambda p: sent_item if p is sent_paper else None,
+    )
+    monkeypatch.setattr(
+        zotero_client, "is_sent", lambda item: item is sent_item
+    )
+
+    def failing_file(item, collections):
+        raise RuntimeError("412 stale")
+
+    monkeypatch.setattr(zotero_client, "file_item", failing_file)
+    result = server.send_papers(["10.1/old", "2401.12345"], collections=["ML"])
+    assert len(sent_documents) == 1  # the fresh paper still shipped
+    assert "could not file already-sent 'Old One'" in result
+    assert "the send itself continues" in result
+    # The receipt must not simultaneously claim the filing happened.
+    assert "filed into requested collections" not in result
+
+
+def test_send_queue_untitled_idless_item_skips_locally(zotero_env, monkeypatch):
+    # An untitled item with no DOI/URL must be skipped locally with the
+    # honest message — its item key must never be sent to a network
+    # title search as if it were a title.
+    monkeypatch.setattr(
+        zotero_client,
+        "unsent_queue_items",
+        lambda: [{"key": "KEY1AAAA", "data": {"title": "", "collections": []}}],
+    )
+
+    def never(ref):
+        raise AssertionError(f"resolver must not be called with {ref!r}")
+
+    monkeypatch.setattr(resolver, "resolve", never)
+    result = server.send_queue()
+    assert "KEY1AAAA (no DOI, URL, or title)" in result
+
+
+def test_send_queue_whitespace_title_skips_locally(zotero_env, monkeypatch):
+    # A whitespace-only title (externally-created items) is truthy but
+    # useless — same local skip as an empty title, named by key.
+    monkeypatch.setattr(
+        zotero_client,
+        "unsent_queue_items",
+        lambda: [{"key": "WSKEY001", "data": {"title": "   "}}],
+    )
+
+    def never(ref):
+        raise AssertionError(f"resolver must not be called with {ref!r}")
+
+    monkeypatch.setattr(resolver, "resolve", never)
+    result = server.send_queue()
+    assert "WSKEY001 (no DOI, URL, or title)" in result
+
+
+def test_send_queue_whitespace_doi_and_url_skip_locally(
+    zotero_env, monkeypatch
+):
+    # Whitespace-only DOI/url fields must not become resolution refs.
+    monkeypatch.setattr(
+        zotero_client,
+        "unsent_queue_items",
+        lambda: [
+            {
+                "key": "WSALL0001",
+                "data": {"DOI": "   ", "url": "  ", "title": " "},
+            }
+        ],
+    )
+
+    def never(ref):
+        raise AssertionError(f"resolver must not be called with {ref!r}")
+
+    monkeypatch.setattr(resolver, "resolve", never)
+    result = server.send_queue()
+    assert "WSALL0001 (no DOI, URL, or title)" in result
