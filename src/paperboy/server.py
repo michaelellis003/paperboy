@@ -1276,7 +1276,13 @@ def send_queue() -> str:
         # stored title — items captured from landing-page-only works
         # have no DOI and a URL the resolver rejects.
         refs = [
-            ref for ref in (data.get("DOI"), data.get("url"), raw_title) if ref
+            ref
+            for ref in (
+                (data.get("DOI") or "").strip(),
+                (data.get("url") or "").strip(),
+                raw_title,
+            )
+            if ref
         ]
         if not refs:
             skipped.append(f"{title} (no DOI, URL, or title)")

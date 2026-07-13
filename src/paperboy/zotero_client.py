@@ -107,13 +107,21 @@ def _tags(item: dict) -> set[str]:
     return {t["tag"] for t in item["data"].get("tags", [])}
 
 
-def display_title(data: dict[str, Any], fallback: str) -> str:
-    """Human-readable item name: non-blank title, else the fallback key.
+def _field(data: dict[str, Any], key: str) -> str:
+    """A stored text field, stripped.
 
-    Externally-created items can carry a whitespace-only title, which is
-    truthy — a bare ``or`` fallback would render receipts nameless.
+    The Zotero API stores what clients send verbatim — externally
+    created items can carry padded or whitespace-only DOI/url/title
+    values, which are truthy but useless as refs, search queries, or
+    match keys. Every read of a stored text field for matching,
+    resolution, or display goes through this.
     """
-    return (data.get("title") or "").strip() or fallback
+    return (data.get(key) or "").strip()
+
+
+def display_title(data: dict[str, Any], fallback: str) -> str:
+    """Human-readable item name: non-blank title, else the fallback key."""
+    return _field(data, "title") or fallback
 
 
 # The item types a fuzzy title match may bridge to: what this pipeline
@@ -132,7 +140,7 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
         or data.get("archiveID", "") == f"arXiv:{paper.arxiv_id}"
     ):
         return True
-    doi = data.get("DOI", "")
+    doi = _field(data, "DOI")
     if paper.doi and doi and paper.doi.lower() == doi.lower():
         return True
     # DOI- and arXiv-resolved forms of the same paper can share no id
@@ -650,10 +658,10 @@ def scholarly_ref_for_key(ref: str) -> str | None:
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
         return archive.removeprefix("arXiv:")
-    # Stripped: a whitespace-only title (externally-created items) is
-    # truthy but useless as a search query — returning it would replace
-    # the user's item key with "   " in resolution and receipts.
-    return data.get("DOI") or (data.get("title") or "").strip() or None
+    # Stripped (see _field): a whitespace-only DOI or title is truthy
+    # but useless as a search query — returning it would replace the
+    # user's item key with "   " in resolution and receipts.
+    return _field(data, "DOI") or _field(data, "title") or None
 
 
 def _matching_items(ref: str, items: list[dict]) -> list[dict]:
@@ -804,8 +812,8 @@ def seed_ids(limit: int = 10) -> list[str]:
         archive = data.get("archiveID", "")
         if archive.startswith("arXiv:"):
             ids.append(archive.replace("arXiv:", "ArXiv:", 1))
-        elif data.get("DOI"):
-            ids.append(f"DOI:{data['DOI']}")
+        elif _field(data, "DOI"):
+            ids.append(f"DOI:{_field(data, 'DOI')}")
         if len(ids) >= limit:
             break
     return ids
@@ -824,8 +832,8 @@ def known_identities() -> set[str]:
     keys: set[str] = set()
     for item in items:
         data = item.get("data", {})
-        if data.get("DOI"):
-            keys.add(data["DOI"].lower())
+        if _field(data, "DOI"):
+            keys.add(_field(data, "DOI").lower())
         archive = data.get("archiveID", "")
         if archive.startswith("arXiv:"):
             keys.add(archive.removeprefix("arXiv:"))
@@ -864,7 +872,9 @@ def list_queue() -> list[dict]:
         entries.append(
             {
                 "title": display_title(data, item["key"]),
-                "ref": data.get("DOI") or data.get("url") or item["key"],
+                "ref": _field(data, "DOI")
+                or _field(data, "url")
+                or item["key"],
                 # The item key is the only id guaranteed unique when the
                 # library holds exact duplicates; every tool accepts it.
                 "key": item["key"],
@@ -881,15 +891,16 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
     if not needle:
         return False
     lowered = needle.lower()
-    # Strip the stored side too: receipts display the stripped title, so
-    # the very title a receipt shows must match back (padded titles on
+    # Stored fields via _field: receipts display the stripped forms, so
+    # the very values a receipt shows must match back (padded fields on
     # externally-created items).
-    if lowered == data.get("title", "").strip().lower():
+    if lowered == _field(data, "title").lower():
         return True
-    if lowered == data.get("url", "").lower():
+    if lowered == _field(data, "url").lower():
         return True
     found_doi = doi.extract_doi(needle)
-    if found_doi and found_doi.lower() == data.get("DOI", "").lower():
+    stored_doi = doi.extract_doi(_field(data, "DOI"))
+    if found_doi and stored_doi and found_doi.lower() == stored_doi.lower():
         return True
     try:
         arxiv_id = arxiv.normalize_id(needle)
@@ -918,7 +929,7 @@ def _unique_ref(data: dict[str, Any]) -> str:
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
         return archive
-    return data.get("DOI") or data.get("url") or "no other id"
+    return _field(data, "DOI") or _field(data, "url") or "no other id"
 
 
 def remove_by_refs(

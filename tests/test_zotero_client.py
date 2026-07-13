@@ -1430,3 +1430,73 @@ def test_ref_matches_padded_stored_title(fake_api):
     removed, misses, _ = zotero_client.remove_by_refs(["Foo Bar"])
     assert [e["title"] for e in removed] == ["Foo Bar"]
     assert misses == []
+
+
+# --- round-J fixes: strip-before-use covers DOI/url too -------------------
+
+
+def test_whitespace_doi_does_not_beat_real_title_as_ref(fake_api, env):
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    fake_api.queue = [
+        {
+            "key": "WSDOI001",
+            "data": {"DOI": "   ", "title": "A Real Title", "collections": []},
+        }
+    ]
+    assert zotero_client.scholarly_ref_for_key("WSDOI001") == "A Real Title"
+
+
+def test_list_queue_ref_skips_whitespace_doi(fake_api):
+    fake_api.queue = [
+        {
+            "key": "WSDOI001",
+            "data": {"DOI": "   ", "url": "", "title": "T", "collections": []},
+        }
+    ]
+    assert zotero_client.list_queue()[0]["ref"] == "WSDOI001"
+
+
+def test_padded_stored_doi_matches_back(fake_api):
+    # list_queue displays/advertises stripped values; the clean DOI a
+    # receipt shows must match the padded stored field.
+    fake_api.queue = [
+        {
+            "key": "A",
+            "data": {
+                "title": "Alpha",
+                "DOI": "  10.1234/abc  ",
+                "collections": [],
+            },
+        }
+    ]
+    removed, misses, _ = zotero_client.remove_by_refs(["10.1234/abc"])
+    assert [e["title"] for e in removed] == ["Alpha"]
+    assert misses == []
+
+
+def test_padded_stored_doi_dedups_in_matches(fake_api, paper_factory):
+    fake_api.queue = [
+        {
+            "key": "P1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Different Words",
+                "DOI": "  10.1234/abc  ",
+                "collections": [],
+            },
+        }
+    ]
+    paper = paper_factory(title="Other", arxiv_id=None, doi="10.1234/abc")
+    item = zotero_client.find_item(paper)
+    assert item is not None and item["key"] == "P1"
+
+
+def test_seed_ids_strip_padded_doi(fake_api):
+    fake_api.queue = [
+        {"key": "S1", "data": {"DOI": "  10.1/x  ", "collections": []}}
+    ]
+    assert zotero_client.seed_ids() == ["DOI:10.1/x"]

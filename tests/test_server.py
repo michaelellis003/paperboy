@@ -1838,3 +1838,26 @@ def test_send_queue_whitespace_title_skips_locally(zotero_env, monkeypatch):
     monkeypatch.setattr(resolver, "resolve", never)
     result = server.send_queue()
     assert "WSKEY001 (no DOI, URL, or title)" in result
+
+
+def test_send_queue_whitespace_doi_and_url_skip_locally(
+    zotero_env, monkeypatch
+):
+    # Whitespace-only DOI/url fields must not become resolution refs.
+    monkeypatch.setattr(
+        zotero_client,
+        "unsent_queue_items",
+        lambda: [
+            {
+                "key": "WSALL0001",
+                "data": {"DOI": "   ", "url": "  ", "title": " "},
+            }
+        ],
+    )
+
+    def never(ref):
+        raise AssertionError(f"resolver must not be called with {ref!r}")
+
+    monkeypatch.setattr(resolver, "resolve", never)
+    result = server.send_queue()
+    assert "WSALL0001 (no DOI, URL, or title)" in result
