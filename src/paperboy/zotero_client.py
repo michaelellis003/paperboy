@@ -136,10 +136,11 @@ def _matches(paper: Paper, data: dict[str, Any]) -> bool:
     item_type = data.get("itemType", "")
     if item_type and item_type not in _PAPER_ITEM_TYPES:
         return False
+    # Both normalized forms must be non-empty: two all-punctuation (or
+    # otherwise normalization-degenerate) titles are not the same work.
+    wanted = normalize_title(paper.title)
     title = data.get("title", "")
-    return bool(
-        title and normalize_title(paper.title) == normalize_title(title)
-    )
+    return bool(title and wanted and wanted == normalize_title(title))
 
 
 def find_item(paper: Paper) -> dict | None:
@@ -400,8 +401,9 @@ def _matches_book(book: Book, data: dict[str, Any]) -> bool:
     stored_isbns = _book_isbns(data)
     if book.isbn or stored_isbns:
         return bool(book.isbn and book.isbn in stored_isbns)
+    wanted = normalize_title(book.title)
     title = data.get("title", "")
-    return bool(title and normalize_title(book.title) == normalize_title(title))
+    return bool(title and wanted and wanted == normalize_title(title))
 
 
 def find_book(book: Book) -> dict | None:
@@ -521,6 +523,10 @@ def find_attach_target(item_type: str, title: str) -> dict | None:
     """
     api = _api()
     wanted = normalize_title(title)
+    if not wanted:
+        # A normalization-degenerate title (all punctuation/symbols)
+        # must never reuse-by-title — it would match any other such item.
+        return None
     # titleCreatorYear mode searches titles rather than full text, so a
     # generic title can't drown the target past the fetch limit (a miss
     # here degrades to a duplicate item — the exact failure reuse is
@@ -718,7 +724,7 @@ def file_by_refs(
         if key:
             _add_to_collection(fresh[0], key)
         done.add(fresh[0]["key"])
-        filed.append(fresh[0]["data"].get("title", fresh[0]["key"]))
+        filed.append(fresh[0]["data"].get("title") or fresh[0]["key"])
     return filed, misses, ambiguous
 
 
@@ -760,7 +766,7 @@ def unfile_by_refs(
             continue
         api.deletefrom_collection(key, fresh[0])
         done.add(fresh[0]["key"])
-        removed.append(fresh[0]["data"].get("title", fresh[0]["key"]))
+        removed.append(fresh[0]["data"].get("title") or fresh[0]["key"])
     return removed, misses, ambiguous
 
 
@@ -812,7 +818,11 @@ def known_identities() -> set[str]:
         if archive.startswith("arXiv:"):
             keys.add(archive.removeprefix("arXiv:"))
         if data.get("title"):
-            keys.add(normalize_title(data["title"]))
+            normalized = normalize_title(data["title"])
+            if normalized:
+                # An empty normalized form would false-match every
+                # equally degenerate title in the dedup intersection.
+                keys.add(normalized)
     return keys
 
 
@@ -841,7 +851,7 @@ def list_queue() -> list[dict]:
             status = "unsent"
         entries.append(
             {
-                "title": data.get("title", item["key"]),
+                "title": data.get("title") or item["key"],
                 "ref": data.get("DOI") or data.get("url") or item["key"],
                 # The item key is the only id guaranteed unique when the
                 # library holds exact duplicates; every tool accepts it.
@@ -953,7 +963,7 @@ def remove_by_refs(
         done.add(match["key"])
         removed.append(
             {
-                "title": match["data"].get("title", match["key"]),
+                "title": match["data"].get("title") or match["key"],
                 "was_sent": is_sent(match),
                 "kept_in_library": bool(other),
             }

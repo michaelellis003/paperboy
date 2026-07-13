@@ -61,3 +61,36 @@ def test_biorxiv_pdf_urls_helper():
     assert biorxiv_pdf_urls(None) == []
     urls = biorxiv_pdf_urls("10.1101/abc")
     assert "biorxiv.org" in urls[0] and "medrxiv.org" in urls[1]
+
+
+# --- round-F fixes: Unicode-aware normalization --------------------------
+
+
+def test_normalize_title_preserves_non_latin_scripts():
+    from paperboy.models import normalize_title
+
+    russian_a = normalize_title("Квантовая механика и интегралы")
+    russian_b = normalize_title("Введение в теорию вероятностей")
+    assert russian_a and russian_b
+    assert russian_a != russian_b
+    assert normalize_title("量子力学") != normalize_title("統計力学")
+
+
+def test_normalize_title_unifies_nfc_and_nfd():
+    import unicodedata
+
+    from paperboy.models import normalize_title
+
+    nfc = unicodedata.normalize("NFC", "Schrödinger Equation")
+    nfd = unicodedata.normalize("NFD", "Schrödinger Equation")
+    assert normalize_title(nfc) == normalize_title(nfd) != ""
+
+
+def test_normalize_title_still_strips_punctuation_and_case():
+    from paperboy.models import normalize_title
+
+    assert (
+        normalize_title("Attention Is All You Need!")
+        == normalize_title("attention is all you need")
+        == "attention is all you need"
+    )

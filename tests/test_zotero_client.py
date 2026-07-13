@@ -1331,3 +1331,70 @@ def test_attach_pdf_item_rerun_does_not_duplicate_attachment(fake_api):
     )
     assert second == ("NEWITEM", "existing", True)
     assert len(fake_api.attached) == 1  # no second upload
+
+
+# --- round-F fixes -------------------------------------------------------
+
+
+def test_distinct_non_latin_titles_do_not_merge(fake_api, paper_factory):
+    # Both titles used to normalize to "" and false-match everywhere.
+    fake_api.queue = [
+        {
+            "key": "RU1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Квантовая механика и интегралы",
+            },
+        }
+    ]
+    other = paper_factory(
+        title="Введение в теорию вероятностей", arxiv_id=None, doi=None
+    )
+    assert zotero_client.find_item(other) is None
+
+
+def test_same_non_latin_title_still_dedups(fake_api, paper_factory):
+    fake_api.queue = [
+        {
+            "key": "RU1",
+            "data": {
+                "itemType": "journalArticle",
+                "title": "Квантовая механика и интегралы",
+            },
+        }
+    ]
+    same = paper_factory(
+        title="Квантовая механика и интегралы!", arxiv_id=None, doi=None
+    )
+    item = zotero_client.find_item(same)
+    assert item is not None and item["key"] == "RU1"
+
+
+def test_degenerate_titles_never_match(fake_api, paper_factory):
+    # All-punctuation titles normalize to ""; two of them are NOT the
+    # same work.
+    fake_api.queue = [
+        {
+            "key": "P1",
+            "data": {"itemType": "journalArticle", "title": "???"},
+        }
+    ]
+    other = paper_factory(title="!!!", arxiv_id=None, doi=None)
+    assert zotero_client.find_item(other) is None
+
+
+def test_find_attach_target_refuses_degenerate_title(fake_api):
+    fake_api.library_items = [
+        {"key": "X1", "data": {"itemType": "report", "title": "***"}}
+    ]
+    assert zotero_client.find_attach_target("report", "!!!") is None
+
+
+def test_untitled_item_receipts_fall_back_to_key(fake_api):
+    # The real API serves title: "" (key present) for untitled items;
+    # receipts must fall back to the item key, not render blank.
+    fake_api.queue = [
+        {"key": "UNTITLED1", "data": {"title": "", "collections": []}}
+    ]
+    entries = zotero_client.list_queue()
+    assert entries[0]["title"] == "UNTITLED1"

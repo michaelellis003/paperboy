@@ -39,13 +39,17 @@ def _clean_isbn(raw: str) -> str:
     return _ISBN_CHARS.sub("", _ISBN_LABEL.sub("", raw)).upper()
 
 
-def normalize_isbn(raw: str) -> str | None:
+def normalize_isbn(raw: object) -> str | None:
     """Return the ISBN-13 form of a valid ISBN-10/13, else None.
 
     Strips an "ISBN-13:"-style label, hyphens, and spaces, validates
     the check digit, and converts ISBN-10 to ISBN-13 so the same
     edition deduplicates regardless of which form a source reports.
+    Non-string input answers None — registry identifier lists carry
+    null and non-string entries in the wild.
     """
+    if not isinstance(raw, str):
+        return None
     cleaned = _clean_isbn(raw)
     if len(cleaned) == 10 and _valid_isbn10(cleaned):
         return _isbn10_to_13(cleaned)
@@ -259,9 +263,13 @@ def _crossref_authors(message: dict) -> list[str]:
 def _best_book_match(
     ref: str, candidates: list[Book], best: Book | None, best_ratio: float
 ) -> tuple[Book | None, float]:
+    wanted = normalize_title(ref)
+    if not wanted:
+        # SequenceMatcher("", "") is 1.0 — see resolver._best_title_match.
+        return best, best_ratio
     for book in candidates:
         ratio = difflib.SequenceMatcher(
-            None, normalize_title(ref), normalize_title(book.title)
+            None, wanted, normalize_title(book.title)
         ).ratio()
         if ratio > best_ratio:
             best, best_ratio = book, ratio

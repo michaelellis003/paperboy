@@ -546,3 +546,13 @@ def test_fetch_pdf_rejects_html_early(monkeypatch):
     )
     with pytest.raises(ValueError, match="non-PDF content"):
         resolver.fetch_pdf("https://host/notpdf")
+
+
+def test_degenerate_title_never_auto_accepts(monkeypatch, paper_factory):
+    # normalize("!!!") == normalize("???") == "" and
+    # SequenceMatcher("", "") == 1.0 — must not resolve a wrong paper.
+    candidate = paper_factory(title="???", arxiv_id=None, doi="10.1/x")
+    monkeypatch.setattr(openalex, "search", lambda q, max_results: [candidate])
+    monkeypatch.setattr(arxiv, "search", lambda q, max_results: [])
+    with pytest.raises(ValueError, match="arXiv id, DOI, or"):
+        resolver.resolve("!!!")

@@ -49,10 +49,15 @@ def _best_title_match(
     ref: str, candidates: list[Paper]
 ) -> tuple[Paper | None, float]:
     """Closest candidate to ``ref`` and its similarity ratio."""
+    wanted = normalize_title(ref)
+    if not wanted:
+        # SequenceMatcher("", "") is 1.0 — a normalization-degenerate
+        # ref would auto-accept any equally degenerate candidate.
+        return None, 0.0
     best, best_ratio = None, 0.0
     for paper in candidates:
         ratio = difflib.SequenceMatcher(
-            None, normalize_title(ref), normalize_title(paper.title)
+            None, wanted, normalize_title(paper.title)
         ).ratio()
         if ratio > best_ratio:
             best, best_ratio = paper, ratio

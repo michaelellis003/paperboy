@@ -1,15 +1,24 @@
 """Shared paper model, independent of where the paper was resolved."""
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
-_WORDS = re.compile(r"[^a-z0-9 ]")
+# Unicode-aware: [\W_] keeps letters and digits of EVERY script. An
+# ASCII-only class would collapse a Cyrillic or CJK title to "", making
+# all such titles false-equal across dedup and title matching.
+_WORDS = re.compile(r"[\W_]")
 _HTML_TAG = re.compile(r"<[^>]+>")
 
 
 def normalize_title(text: str) -> str:
-    """Lowercased, punctuation-free title for matching/dedup."""
-    return " ".join(_WORDS.sub(" ", text.lower()).split())
+    """Casefolded, punctuation-free title for matching/dedup.
+
+    NFKC unifies composed/decomposed forms (NFC "ö" vs NFD "o"+umlaut)
+    so two sources disagreeing on Unicode form still deduplicate.
+    """
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return " ".join(_WORDS.sub(" ", folded).split())
 
 
 def clean_title(text: str) -> str:

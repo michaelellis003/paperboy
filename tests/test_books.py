@@ -403,3 +403,31 @@ def test_isbn_label_regex_does_not_eat_number_digits():
     # stripping them would corrupt a legitimate ISBN.
     assert books._clean_isbn("ISBN-1306406152") == "1306406152"
     assert books._clean_isbn("ISBN 1078454220") == "1078454220"
+
+
+def test_normalize_isbn_rejects_non_string_input():
+    # Registry identifier lists carry null/non-string entries.
+    assert books.normalize_isbn(None) is None
+    assert books.normalize_isbn(9780306406157) is None
+
+
+def test_openlibrary_title_docs_with_null_isbn_entries(monkeypatch):
+    docs = [
+        {
+            "title": "Graphical Models",
+            "author_name": ["Lauritzen"],
+            "isbn": [None, "9780306406157"],
+        }
+    ]
+    use_client(monkeypatch, _title_handler(docs))
+    book = books.resolve_book("Graphical Models")
+    assert book.isbn == "9780306406157"
+
+
+def test_degenerate_title_ref_never_confidently_matches(monkeypatch):
+    # SequenceMatcher("", "") is 1.0; an all-punctuation ref must not
+    # auto-accept an equally degenerate candidate.
+    docs = [{"title": "???", "author_name": ["X"]}]
+    use_client(monkeypatch, _title_handler(docs))
+    with pytest.raises(ValueError, match="No book found"):
+        books.resolve_book("!!!")

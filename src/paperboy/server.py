@@ -687,7 +687,7 @@ def send_papers(
                 zotero_client.file_item(item, collections)
             except Exception as exc:
                 filing_failed = True
-                title = item["data"].get("title", item["key"])
+                title = item["data"].get("title") or item["key"]
                 problems.append(
                     f"could not file already-sent {title!r} under "
                     f"{'; '.join(collections)} ({type(exc).__name__}) — "
@@ -1264,7 +1264,7 @@ def send_queue() -> str:
     downloaded, skipped = [], []
     for item in items:
         data = item["data"]
-        title = data.get("title", item["key"])
+        title = data.get("title") or item["key"]
         # Try the strongest identifier first, but fall back to the
         # stored title — items captured from landing-page-only works
         # have no DOI and a URL the resolver rejects.
