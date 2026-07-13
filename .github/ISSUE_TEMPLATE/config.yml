@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup help
+    url: https://github.com/michaelellis003/paperboy/blob/main/docs/setup.md
+    about: Step-by-step setup for every credential, before filing a bug.
+  - name: Security issue
+    url: https://github.com/michaelellis003/paperboy/security/advisories/new
+    about: Report vulnerabilities privately, never in a public issue.

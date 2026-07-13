@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new capability or a change to an existing tool
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do that paperboy can't do today? A
+        concrete session that hit the gap ("I tried X, got Y") is the
+        most useful framing.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: >
+        What should happen instead? If this means a new tool or changed
+        parameters, sketch the receipt you'd expect back.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried

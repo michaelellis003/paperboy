@@ -1,0 +1,56 @@
+name: Bug report
+description: Something behaved wrong or a receipt was misleading
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. One thing before you start: **never paste
+        secrets** (your `.env`, API keys, bearer tokens) into an issue.
+        The `setup_status` output is safe to share; it contains no
+        secret values by design.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you ask for, and what went wrong?
+      placeholder: I asked Claude to add a book by ISBN and ...
+    validations:
+      required: true
+  - type: textarea
+    id: receipt
+    attributes:
+      label: Exact receipt or error text
+      description: >
+        Paste the exact text the tool returned. Receipts are the
+        fastest way to locate a bug.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: How are you running the server?
+      options:
+        - Locally (stdio, Claude Code / Claude Desktop)
+        - Cloud Run / remote HTTP
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: setup_status output (optional, no secrets in it)
+      description: Ask Claude to "check my paperboy setup" and paste the result.
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: paperboy version or commit
+      placeholder: v0.4.1
