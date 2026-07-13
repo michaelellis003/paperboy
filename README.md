@@ -168,11 +168,17 @@ including the OAuth console steps, the security model, and cost bounds.
 The deploy script also prints the exact OAuth steps with your project's
 URLs already filled in, so you're not copying them from here.
 
-## Development
+## Development & contributing
 
 uv for packaging, ruff (Google style), ty, pytest behind an enforced
 80% coverage gate. `uv sync && uv run pre-commit install`, then
-`uv run pytest`.
+`uv run pytest`. The suite runs entirely offline; no credentials
+needed to develop.
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers
+setup, testing conventions, and what makes a change easy to merge;
+[SECURITY.md](SECURITY.md) covers how to report vulnerabilities
+(privately, please).
 
 ## Roadmap
 
