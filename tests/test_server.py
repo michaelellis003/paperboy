@@ -1803,3 +1803,21 @@ def test_send_papers_survives_filing_failure(
     assert "the send itself continues" in result
     # The receipt must not simultaneously claim the filing happened.
     assert "filed into requested collections" not in result
+
+
+def test_send_queue_untitled_idless_item_skips_locally(zotero_env, monkeypatch):
+    # An untitled item with no DOI/URL must be skipped locally with the
+    # honest message — its item key must never be sent to a network
+    # title search as if it were a title.
+    monkeypatch.setattr(
+        zotero_client,
+        "unsent_queue_items",
+        lambda: [{"key": "KEY1AAAA", "data": {"title": "", "collections": []}}],
+    )
+
+    def never(ref):
+        raise AssertionError(f"resolver must not be called with {ref!r}")
+
+    monkeypatch.setattr(resolver, "resolve", never)
+    result = server.send_queue()
+    assert "KEY1AAAA (no DOI, URL, or title)" in result

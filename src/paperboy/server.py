@@ -1264,11 +1264,19 @@ def send_queue() -> str:
     downloaded, skipped = [], []
     for item in items:
         data = item["data"]
+        # Display name falls back to the item key, but the key must
+        # never become a RESOLUTION ref — an untitled, id-less item
+        # would send its random key into a doomed network title search
+        # instead of the honest local skip below.
         title = data.get("title") or item["key"]
         # Try the strongest identifier first, but fall back to the
         # stored title — items captured from landing-page-only works
         # have no DOI and a URL the resolver rejects.
-        refs = [ref for ref in (data.get("DOI"), data.get("url"), title) if ref]
+        refs = [
+            ref
+            for ref in (data.get("DOI"), data.get("url"), data.get("title"))
+            if ref
+        ]
         if not refs:
             skipped.append(f"{title} (no DOI, URL, or title)")
             continue
