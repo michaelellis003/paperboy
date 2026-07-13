@@ -58,9 +58,18 @@ class FakeZotero:
         return {"itemType": item_type, "DOI": ""}
 
     def attachment_simple(self, files, parentid=None):
+        # Mirror pyzotero: every call creates a NEW child attachment
+        # item, even when the file blob dedupes as "unchanged".
         self.attached = getattr(self, "attached", [])
         self.attached.append((parentid, list(files)))
+        self.child_items = getattr(self, "child_items", {})
+        self.child_items.setdefault(parentid, []).append(
+            {"data": {"contentType": "application/pdf"}}
+        )
         return {"success": {"0": "AKEY"}, "failure": {}, "unchanged": {}}
+
+    def children(self, key):
+        return getattr(self, "child_items", {}).get(key, [])
 
     def create_items(self, payload):
         if self.fail_create:
@@ -1241,3 +1250,84 @@ def test_unfile_by_refs_two_refs_same_item_removes_once(fake_api):
     assert misses == []
     assert ambiguous == []
     assert fake_api.uncollected == [("TOPIC", "A")]
+
+
+# --- round-D fixes -------------------------------------------------------
+
+
+def test_partially_consumed_ambiguity_still_refuses(fake_api):
+    # Item A filed via its key; the shared title still matches A and B.
+    # Acting on B by elimination would be guessing — the refusal
+    # contract holds even when one candidate was already handled.
+    fake_api.queue = [
+        {"key": "AAAA1111", "data": {"title": "Deep Learning"}},
+        {"key": "BBBB2222", "data": {"title": "Deep Learning"}},
+    ]
+    filed, _misses, ambiguous = zotero_client.file_by_refs(
+        ["AAAA1111", "Deep Learning"], "Topical"
+    )
+    assert filed == ["Deep Learning"]  # A only
+    assert fake_api.collection_adds == [("NEWCOLL", "AAAA1111")]
+    assert len(ambiguous) == 1  # the title ref refused, both candidates
+    assert {c["key"] for c in ambiguous[0]["candidates"]} == {
+        "AAAA1111",
+        "BBBB2222",
+    }
+
+
+def test_remove_partially_consumed_ambiguity_still_refuses(fake_api):
+    fake_api.queue = [
+        {"key": "AAAA1111", "data": {"title": "Deep Learning"}},
+        {"key": "BBBB2222", "data": {"title": "Deep Learning"}},
+    ]
+    removed, _misses, ambiguous = zotero_client.remove_by_refs(
+        ["AAAA1111", "Deep Learning"]
+    )
+    assert len(removed) == 1  # A only; B untouched
+    assert len(ambiguous) == 1
+    assert fake_api.trashed == ["AAAA1111"]
+
+
+def test_remove_by_refs_aliased_refs_remove_once(fake_api):
+    # DOI ref and title ref naming the same item: removed once, second
+    # ref consumed silently (not a miss).
+    fake_api.queue = [
+        {"key": "A", "data": {"title": "Alpha", "DOI": "10.1000/alpha"}},
+    ]
+    removed, misses, _ambiguous = zotero_client.remove_by_refs(
+        ["10.1000/alpha", "Alpha"]
+    )
+    assert len(removed) == 1
+    assert misses == []
+    assert fake_api.trashed == ["A"]
+
+
+def test_attach_pdf_item_rerun_does_not_duplicate_attachment(fake_api):
+    # First run creates the item and attaches; a re-run reuses the item
+    # AND skips the upload — pyzotero would create a duplicate child
+    # attachment item per call.
+    first = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=["Jane Doe"],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert first == ("NEWITEM", "created", True)
+    fake_api.library_items = [
+        {
+            "key": "NEWITEM",
+            "data": {
+                "itemType": "report",
+                "title": "A Working Paper",
+                "collections": [],
+            },
+        }
+    ]
+    second = zotero_client.attach_pdf_item(
+        item_type="report",
+        title="A Working Paper",
+        authors=["Jane Doe"],
+        pdf_path="/tmp/x.pdf",
+    )
+    assert second == ("NEWITEM", "existing", True)
+    assert len(fake_api.attached) == 1  # no second upload

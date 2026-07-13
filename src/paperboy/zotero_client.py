@@ -495,6 +495,23 @@ def _attach_file(parent_key: str, pdf_path: str) -> bool:
     return not result.get("failure")
 
 
+def _has_pdf_attachment(item_key: str) -> bool:
+    """Whether the item already has a PDF child attachment.
+
+    Best-effort: when children can't be listed, answer False and let
+    the upload proceed — a duplicate attachment is the lesser evil to
+    a missing one.
+    """
+    try:
+        children = _api().children(item_key)
+    except Exception:
+        return False
+    return any(
+        child.get("data", {}).get("contentType") == "application/pdf"
+        for child in children
+    )
+
+
 def find_attach_target(item_type: str, title: str) -> dict | None:
     """An existing item with this exact type and normalized title.
 
@@ -546,6 +563,11 @@ def attach_pdf_item(
     existing = find_attach_target(item_type, title)
     if existing:
         _add_to_collections(existing, kept_keys)
+        # A successful earlier run already attached the PDF; uploading
+        # again would add a duplicate child attachment (pyzotero creates
+        # a new attachment item per call even when the blob dedupes).
+        if _has_pdf_attachment(existing["key"]):
+            return existing["key"], "existing", True
         return (
             existing["key"],
             "existing",
@@ -679,12 +701,17 @@ def file_by_refs(
             continue
         # Two refs naming the same item (its DOI and its title, say):
         # the item is already filed, and a second stale-version write
-        # would 412 against the real API. Consume the ref silently.
+        # would 412 against the real API. Consume the ref only when
+        # EVERYTHING it names was already handled — a ref that also
+        # matches a fresh item is still genuinely ambiguous, and acting
+        # on the leftover candidate would be guessing (the docstring's
+        # refusal contract). Candidates list ALL matches so the hints
+        # stay actionable.
         fresh = [m for m in matches if m["key"] not in done]
         if not fresh:
             continue
-        if len(fresh) > 1:
-            ambiguous.append(_ambiguity(ref, fresh))
+        if len(matches) > 1:
+            ambiguous.append(_ambiguity(ref, matches))
             continue
         if key is None:
             key = collection_key(collection_name, create=True)
@@ -722,12 +749,14 @@ def unfile_by_refs(
             misses.append(ref)
             continue
         # A second ref naming an item already removed this call would
-        # re-PATCH with a stale version (412). Consume it silently.
+        # re-PATCH with a stale version (412) — consume it, but only
+        # when EVERYTHING it names was handled; a ref that also matches
+        # a fresh item is still ambiguous (see file_by_refs).
         fresh = [m for m in matches if m["key"] not in done]
         if not fresh:
             continue
-        if len(fresh) > 1:
-            ambiguous.append(_ambiguity(ref, fresh))
+        if len(matches) > 1:
+            ambiguous.append(_ambiguity(ref, matches))
             continue
         api.deletefrom_collection(key, fresh[0])
         done.add(fresh[0]["key"])
@@ -890,15 +919,24 @@ def remove_by_refs(
         return [], [ref for ref in refs if ref.strip()], []
     items = _queue_items()
     removed, misses, ambiguous = [], [], []
+    done: set[str] = set()
     for ref in refs:
         matches = _matching_items(ref, items)
         if not matches:
             misses.append(ref)
             continue
+        # A later ref naming an item already removed this call (its DOI
+        # and its title, say) is consumed — but only when EVERYTHING it
+        # names was handled. A ref that also matches a fresh item stays
+        # ambiguous: removal is the one place a wrong guess loses state,
+        # so it must never act on the leftover candidate by elimination.
+        fresh = [m for m in matches if m["key"] not in done]
+        if not fresh:
+            continue
         if len(matches) > 1:
             ambiguous.append(_ambiguity(ref, matches))
             continue
-        match = matches[0]
+        match = fresh[0]
         # An item the user filed into topical collections is theirs to
         # keep: only drop its queue membership. Items that live nowhere
         # else go to Zotero's Trash — same as Delete in the Zotero app,
@@ -912,7 +950,7 @@ def remove_by_refs(
             api.deletefrom_collection(queue_key, match)
         else:
             _trash_item(api, match)
-        items.remove(match)
+        done.add(match["key"])
         removed.append(
             {
                 "title": match["data"].get("title", match["key"]),

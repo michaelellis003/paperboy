@@ -676,6 +676,7 @@ def send_papers(
     # the same stale dict would 412 — and degrade filing failures into
     # the receipt: nothing has been delivered yet, and a filing hiccup
     # must not kill the whole send.
+    filing_failed = False
     if settings().zotero_enabled and collections:
         filed_keys: set[str] = set()
         for item in already_sent_items:
@@ -685,11 +686,21 @@ def send_papers(
             try:
                 zotero_client.file_item(item, collections)
             except Exception as exc:
+                filing_failed = True
+                title = item["data"].get("title", item["key"])
                 problems.append(
-                    "could not file an already-sent paper under "
+                    f"could not file already-sent {title!r} under "
                     f"{'; '.join(collections)} ({type(exc).__name__}) — "
                     "the send itself continues"
                 )
+    # The receipts below claim "filed into requested collections" for
+    # already-sent items; a recorded filing failure makes that claim a
+    # contradiction, so suppress it and let the named problem speak.
+    filed_note = (
+        ", filed into requested collections"
+        if collections and not filing_failed
+        else ""
+    )
 
     downloaded, failures, junk = _download_all(sendable)
     junk_keys = {id(paper) for paper in junk}
@@ -709,9 +720,7 @@ def send_papers(
                 queued_note += f", filed under: {'; '.join(collections)}"
             queued_note += ")"
         skips = [f"no open-access PDF: {p.title}" for p in no_pdf] + [
-            "already sent (use force=True to resend"
-            + (", filed into requested collections" if collections else "")
-            + f"): {p.title}"
+            f"already sent (use force=True to resend{filed_note}): {p.title}"
             for p in already_sent
         ]
         tail = "; ".join(skips + problems) or "no valid refs given"
@@ -762,7 +771,7 @@ def send_papers(
         receipt += f" | {note}: {titles}{_oa_hint()}"
     if already_sent:
         titles = "; ".join(paper.title for paper in already_sent)
-        extra = ", filed into requested collections" if collections else ""
+        extra = filed_note
         receipt += (
             f" | Already sent, skipped (force=True to resend{extra}): {titles}"
         )

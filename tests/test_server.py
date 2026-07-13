@@ -1780,7 +1780,10 @@ def test_send_papers_survives_filing_failure(
         "resolve",
         lambda ref: sent_paper if ref == "10.1/old" else fresh_paper,
     )
-    sent_item = {"key": "S1", "data": {"collections": [], "tags": []}}
+    sent_item = {
+        "key": "S1",
+        "data": {"title": "Old One", "collections": [], "tags": []},
+    }
     monkeypatch.setattr(
         zotero_client,
         "find_item",
@@ -1796,5 +1799,7 @@ def test_send_papers_survives_filing_failure(
     monkeypatch.setattr(zotero_client, "file_item", failing_file)
     result = server.send_papers(["10.1/old", "2401.12345"], collections=["ML"])
     assert len(sent_documents) == 1  # the fresh paper still shipped
-    assert "could not file an already-sent paper" in result
+    assert "could not file already-sent 'Old One'" in result
     assert "the send itself continues" in result
+    # The receipt must not simultaneously claim the filing happened.
+    assert "filed into requested collections" not in result
