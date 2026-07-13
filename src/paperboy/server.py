@@ -671,10 +671,25 @@ def send_papers(
 
     # Filing is independent of delivery: papers skipped as already
     # sent still get filed into the requested collections. (Not in
-    # dry_run — previews must not mutate.)
+    # dry_run — previews must not mutate.) Two refs can alias one item
+    # (its DOI and its arXiv id), so dedupe by key — a second write on
+    # the same stale dict would 412 — and degrade filing failures into
+    # the receipt: nothing has been delivered yet, and a filing hiccup
+    # must not kill the whole send.
     if settings().zotero_enabled and collections:
+        filed_keys: set[str] = set()
         for item in already_sent_items:
-            zotero_client.file_item(item, collections)
+            if item["key"] in filed_keys:
+                continue
+            filed_keys.add(item["key"])
+            try:
+                zotero_client.file_item(item, collections)
+            except Exception as exc:
+                problems.append(
+                    "could not file an already-sent paper under "
+                    f"{'; '.join(collections)} ({type(exc).__name__}) — "
+                    "the send itself continues"
+                )
 
     downloaded, failures, junk = _download_all(sendable)
     junk_keys = {id(paper) for paper in junk}

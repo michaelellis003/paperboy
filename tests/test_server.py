@@ -1737,3 +1737,64 @@ def test_attach_pdf_failed_upload_receipt_promises_safe_retry(
     result = server.attach_pdf("https://x/y.pdf", "Notes", ["A"])
     assert "did not upload" in result
     assert "not duplicated" in result
+
+
+def test_send_papers_files_aliased_already_sent_item_once(
+    zotero_env, monkeypatch, paper_factory, sent_documents
+):
+    # One Zotero item can be named by two refs (its DOI and its arXiv
+    # id). Filing it twice would 412 on the stale second write; it must
+    # be filed once and the send must survive a filing failure.
+    doi_form = paper_factory(
+        title="Published Form", arxiv_id=None, doi="10.1/x", pdf_url=None
+    )
+    arxiv_form = paper_factory(title="Preprint Form")
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: doi_form if ref == "10.1/x" else arxiv_form,
+    )
+    shared_item = {"key": "S1", "data": {"collections": [], "tags": []}}
+    monkeypatch.setattr(zotero_client, "find_item", lambda p: shared_item)
+    monkeypatch.setattr(zotero_client, "is_sent", lambda item: True)
+    filed = []
+    monkeypatch.setattr(
+        zotero_client,
+        "file_item",
+        lambda item, collections: filed.append(item["key"]),
+    )
+    result = server.send_papers(["10.1/x", "2401.12345"], collections=["ML"])
+    assert filed == ["S1"]  # once, not twice
+    assert "already sent" in result
+
+
+def test_send_papers_survives_filing_failure(
+    zotero_env, monkeypatch, paper_factory, sent_documents, no_download
+):
+    # A filing hiccup on an already-sent item must not kill the send of
+    # the batch's fresh papers.
+    sent_paper = paper_factory(title="Old One", arxiv_id=None, doi="10.1/old")
+    fresh_paper = paper_factory(title="Fresh One")
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        lambda ref: sent_paper if ref == "10.1/old" else fresh_paper,
+    )
+    sent_item = {"key": "S1", "data": {"collections": [], "tags": []}}
+    monkeypatch.setattr(
+        zotero_client,
+        "find_item",
+        lambda p: sent_item if p is sent_paper else None,
+    )
+    monkeypatch.setattr(
+        zotero_client, "is_sent", lambda item: item is sent_item
+    )
+
+    def failing_file(item, collections):
+        raise RuntimeError("412 stale")
+
+    monkeypatch.setattr(zotero_client, "file_item", failing_file)
+    result = server.send_papers(["10.1/old", "2401.12345"], collections=["ML"])
+    assert len(sent_documents) == 1  # the fresh paper still shipped
+    assert "could not file an already-sent paper" in result
+    assert "the send itself continues" in result
