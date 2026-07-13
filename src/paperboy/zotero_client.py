@@ -650,7 +650,10 @@ def scholarly_ref_for_key(ref: str) -> str | None:
     archive = data.get("archiveID", "")
     if archive.startswith("arXiv:"):
         return archive.removeprefix("arXiv:")
-    return data.get("DOI") or data.get("title") or None
+    # Stripped: a whitespace-only title (externally-created items) is
+    # truthy but useless as a search query — returning it would replace
+    # the user's item key with "   " in resolution and receipts.
+    return data.get("DOI") or (data.get("title") or "").strip() or None
 
 
 def _matching_items(ref: str, items: list[dict]) -> list[dict]:
@@ -878,7 +881,10 @@ def _ref_matches(ref: str, data: dict[str, Any]) -> bool:
     if not needle:
         return False
     lowered = needle.lower()
-    if lowered == data.get("title", "").lower():
+    # Strip the stored side too: receipts display the stripped title, so
+    # the very title a receipt shows must match back (padded titles on
+    # externally-created items).
+    if lowered == data.get("title", "").strip().lower():
         return True
     if lowered == data.get("url", "").lower():
         return True

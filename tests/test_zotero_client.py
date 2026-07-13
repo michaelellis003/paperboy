@@ -1405,3 +1405,28 @@ def test_whitespace_only_title_receipts_fall_back_to_key(fake_api):
         {"key": "WS1", "data": {"title": "   ", "collections": []}}
     ]
     assert zotero_client.list_queue()[0]["title"] == "WS1"
+
+
+def test_scholarly_ref_for_key_strips_whitespace_title(fake_api, env):
+    env.setenv("ZOTERO_API_KEY", "k")
+    env.setenv("ZOTERO_LIBRARY_ID", "1")
+    import paperboy.config
+
+    env.setattr(paperboy.config, "_settings", None)
+    fake_api.queue = [
+        {"key": "WSITEM01", "data": {"title": "   ", "collections": []}}
+    ]
+    # A whitespace-only title must not become the scholarly ref — with
+    # None, ordinary resolution proceeds on the key the user passed.
+    assert zotero_client.scholarly_ref_for_key("WSITEM01") is None
+
+
+def test_ref_matches_padded_stored_title(fake_api):
+    # Receipts display the STRIPPED title; matching that displayed
+    # title back must work even when the stored value is padded.
+    fake_api.queue = [
+        {"key": "A", "data": {"title": "  Foo Bar  ", "collections": []}}
+    ]
+    removed, misses, _ = zotero_client.remove_by_refs(["Foo Bar"])
+    assert [e["title"] for e in removed] == ["Foo Bar"]
+    assert misses == []
