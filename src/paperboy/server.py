@@ -687,7 +687,7 @@ def send_papers(
                 zotero_client.file_item(item, collections)
             except Exception as exc:
                 filing_failed = True
-                title = item["data"].get("title") or item["key"]
+                title = zotero_client.display_title(item["data"], item["key"])
                 problems.append(
                     f"could not file already-sent {title!r} under "
                     f"{'; '.join(collections)} ({type(exc).__name__}) — "
@@ -1267,15 +1267,16 @@ def send_queue() -> str:
         # Display name falls back to the item key, but the key must
         # never become a RESOLUTION ref — an untitled, id-less item
         # would send its random key into a doomed network title search
-        # instead of the honest local skip below.
-        title = data.get("title") or item["key"]
+        # instead of the honest local skip below. Stripped, because a
+        # whitespace-only title (external items) is truthy but useless
+        # as either a name or a search query.
+        raw_title = (data.get("title") or "").strip()
+        title = raw_title or item["key"]
         # Try the strongest identifier first, but fall back to the
         # stored title — items captured from landing-page-only works
         # have no DOI and a URL the resolver rejects.
         refs = [
-            ref
-            for ref in (data.get("DOI"), data.get("url"), data.get("title"))
-            if ref
+            ref for ref in (data.get("DOI"), data.get("url"), raw_title) if ref
         ]
         if not refs:
             skipped.append(f"{title} (no DOI, URL, or title)")

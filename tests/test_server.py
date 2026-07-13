@@ -1821,3 +1821,20 @@ def test_send_queue_untitled_idless_item_skips_locally(zotero_env, monkeypatch):
     monkeypatch.setattr(resolver, "resolve", never)
     result = server.send_queue()
     assert "KEY1AAAA (no DOI, URL, or title)" in result
+
+
+def test_send_queue_whitespace_title_skips_locally(zotero_env, monkeypatch):
+    # A whitespace-only title (externally-created items) is truthy but
+    # useless — same local skip as an empty title, named by key.
+    monkeypatch.setattr(
+        zotero_client,
+        "unsent_queue_items",
+        lambda: [{"key": "WSKEY001", "data": {"title": "   "}}],
+    )
+
+    def never(ref):
+        raise AssertionError(f"resolver must not be called with {ref!r}")
+
+    monkeypatch.setattr(resolver, "resolve", never)
+    result = server.send_queue()
+    assert "WSKEY001 (no DOI, URL, or title)" in result

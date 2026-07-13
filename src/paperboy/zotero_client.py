@@ -107,6 +107,15 @@ def _tags(item: dict) -> set[str]:
     return {t["tag"] for t in item["data"].get("tags", [])}
 
 
+def display_title(data: dict[str, Any], fallback: str) -> str:
+    """Human-readable item name: non-blank title, else the fallback key.
+
+    Externally-created items can carry a whitespace-only title, which is
+    truthy — a bare ``or`` fallback would render receipts nameless.
+    """
+    return (data.get("title") or "").strip() or fallback
+
+
 # The item types a fuzzy title match may bridge to: what this pipeline
 # creates for papers, plus conferencePaper — the type Zotero's browser
 # connector saves CS papers as, usually with no DOI/arXiv id, so the
@@ -724,7 +733,7 @@ def file_by_refs(
         if key:
             _add_to_collection(fresh[0], key)
         done.add(fresh[0]["key"])
-        filed.append(fresh[0]["data"].get("title") or fresh[0]["key"])
+        filed.append(display_title(fresh[0]["data"], fresh[0]["key"]))
     return filed, misses, ambiguous
 
 
@@ -766,7 +775,7 @@ def unfile_by_refs(
             continue
         api.deletefrom_collection(key, fresh[0])
         done.add(fresh[0]["key"])
-        removed.append(fresh[0]["data"].get("title") or fresh[0]["key"])
+        removed.append(display_title(fresh[0]["data"], fresh[0]["key"]))
     return removed, misses, ambiguous
 
 
@@ -851,7 +860,7 @@ def list_queue() -> list[dict]:
             status = "unsent"
         entries.append(
             {
-                "title": data.get("title") or item["key"],
+                "title": display_title(data, item["key"]),
                 "ref": data.get("DOI") or data.get("url") or item["key"],
                 # The item key is the only id guaranteed unique when the
                 # library holds exact duplicates; every tool accepts it.
@@ -963,7 +972,7 @@ def remove_by_refs(
         done.add(match["key"])
         removed.append(
             {
-                "title": match["data"].get("title") or match["key"],
+                "title": display_title(match["data"], match["key"]),
                 "was_sent": is_sent(match),
                 "kept_in_library": bool(other),
             }

@@ -1398,3 +1398,10 @@ def test_untitled_item_receipts_fall_back_to_key(fake_api):
     ]
     entries = zotero_client.list_queue()
     assert entries[0]["title"] == "UNTITLED1"
+
+
+def test_whitespace_only_title_receipts_fall_back_to_key(fake_api):
+    fake_api.queue = [
+        {"key": "WS1", "data": {"title": "   ", "collections": []}}
+    ]
+    assert zotero_client.list_queue()[0]["title"] == "WS1"
